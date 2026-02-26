@@ -15,6 +15,7 @@ Session isolation:
 
 import json
 import time
+import sqlite3
 from typing import Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -121,7 +122,9 @@ class AnalyticsAgent:
         # ── SqliteSaver checkpointer ──────────────────────────────────────
         # Keeps conversation state per thread_id (= session_id).
         # Thread-safe for concurrent requests.
-        self.memory = SqliteSaver.from_conn_string(DB_PATH)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        self.memory = SqliteSaver(conn)
+
 
         # ── LangGraph ReAct agent ─────────────────────────────────────────
         # state_modifier prepends the system prompt before every LLM call
@@ -129,7 +132,7 @@ class AnalyticsAgent:
         self.graph = create_react_agent(
             model=self.llm,
             tools=TOOLS,
-            state_modifier=SystemMessage(content=SYSTEM_PROMPT),
+            prompt=SystemMessage(content=SYSTEM_PROMPT),
             checkpointer=self.memory,
         )
 
