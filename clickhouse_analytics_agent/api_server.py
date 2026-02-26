@@ -1,35 +1,32 @@
 """
 FastAPI server for ClickHouse Analytics Agent.
-
 Endpoints:
-  GET  /                          health check
-  GET  /health                    health check (for monitoring)
-  GET  /api/info                  service info
-  POST /api/analyze               main endpoint — send a query, get analysis + charts
-  POST /api/session/new           create a new session_id
-  GET  /api/session/{session_id}  get session metadata
-  GET  /api/chat-stats            database statistics
-
-All state is persisted in SQLite via SqliteSaver (LangGraph checkpointer).
-Each session is isolated by session_id = LangGraph thread_id.
+  GET  /                              health check
+  GET  /health                        health check (for monitoring)
+  GET  /api/info                      service info
+  POST /api/session/new               create a new conversation session
+  GET  /api/session/{session_id}      get session metadata
+  POST /api/analyze                   submit query → returns job_id immediately
+  GET  /api/job/{job_id}              poll job status / get result
+  GET  /api/chat-stats                database statistics
+Architecture change: async job queue.
+  - POST /api/analyze starts the agent in background, returns job_id instantly.
+  - GET  /api/job/{job_id} returns status: "pending" | "running" | "done" | "error"
+  - Results are kept in memory for 2 hours (JOB_TTL_SECONDS).
+  - Client reconnecting after disconnect can still fetch the result.
 """
-
 import asyncio
 import uuid
-from datetime import datetime
-from typing import Optional
-
+from datetime import datetime, timezone
+from typing import Optional, Literal
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
 load_dotenv()
-
 from config import HOST, PORT, SERVER_URL
-
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="ClickHouse Analytics Agent API",
@@ -37,208 +34,213 @@ app = FastAPI(
         "AI-powered advertising analytics agent. "
         "Queries ClickHouse, analyzes data with Python, returns charts & tables."
     ),
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
-
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # Restrict to your frontend domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
+# ─── Job store ────────────────────────────────────────────────────────────────
+# job_id → JobRecord dict
+# Хранится в памяти; при рестарте сервера задачи теряются (это приемлемо).
+JOB_TTL_SECONDS = 7200  # 2 часа
+JobStatus = Literal["pending", "running", "done", "error"]
+_jobs: dict[str, dict] = {}
+def _new_job(session_id: str, query: str) -> str:
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "session_id": session_id,
+        "query": query,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,   # AnalyzeResponse dict when done
+        "error": None,
+    }
+    return job_id
+def _set_running(job_id: str) -> None:
+    _jobs[job_id]["status"] = "running"
+    _jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+def _set_done(job_id: str, result: dict) -> None:
+    _jobs[job_id]["status"] = "done"
+    _jobs[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+    _jobs[job_id]["result"] = result
+def _set_error(job_id: str, error: str) -> None:
+    _jobs[job_id]["status"] = "error"
+    _jobs[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+    _jobs[job_id]["error"] = error
 # ─── Request / Response models ────────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
-    """Request body for POST /api/analyze."""
     query: str
     session_id: Optional[str] = None
-
-
-class AnalyzeResponse(BaseModel):
-    """Successful response from POST /api/analyze."""
-    success: bool
+class SubmitResponse(BaseModel):
+    """Returned immediately after POST /api/analyze."""
+    job_id: str
     session_id: str
-    text_output: str
-    plots: list[str]        # base64 PNG data URIs: "data:image/png;base64,..."
-    tool_calls: list[dict]  # [{tool: str, input: dict}, ...]
-    error: Optional[str]
-    timestamp: str
-
-
+    status: str   # always "pending"
+    message: str
+class JobStatusResponse(BaseModel):
+    """Returned by GET /api/job/{job_id}."""
+    job_id: str
+    session_id: str
+    status: JobStatus
+    created_at: str
+    started_at: Optional[str]
+    finished_at: Optional[str]
+    # Present only when status == "done"
+    success: Optional[bool] = None
+    text_output: Optional[str] = None
+    plots: Optional[list[str]] = None
+    tool_calls: Optional[list[dict]] = None
+    error: Optional[str] = None
+# ─── Background worker ────────────────────────────────────────────────────────
+async def _run_agent_job(job_id: str) -> None:
+    """Run the agent in a thread pool and store the result in _jobs."""
+    job = _jobs.get(job_id)
+    if not job:
+        return
+    _set_running(job_id)
+    try:
+        from agent import get_agent
+        agent = get_agent()
+        result = await asyncio.to_thread(
+            agent.run,
+            query=job["query"],
+            session_id=job["session_id"],
+        )
+        _set_done(job_id, result)
+    except Exception as exc:
+        _set_error(job_id, str(exc))
+        print(f"[job:{job_id}] ERROR: {exc}")
+# ─── Cleanup loop ─────────────────────────────────────────────────────────────
+async def _cleanup_loop() -> None:
+    """Remove expired jobs and parquet files every 30 minutes."""
+    while True:
+        await asyncio.sleep(1800)
+        now = datetime.now(timezone.utc).timestamp()
+        # Clean expired jobs
+        expired = [
+            jid for jid, j in list(_jobs.items())
+            if j["status"] in ("done", "error")
+            and j["finished_at"]
+            and (now - datetime.fromisoformat(j["finished_at"]).timestamp()) > JOB_TTL_SECONDS
+        ]
+        for jid in expired:
+            del _jobs[jid]
+        if expired:
+            print(f"[cleanup] Removed {len(expired)} expired job(s)")
+        # Clean parquet files
+        try:
+            from agent import get_agent
+            n = await asyncio.to_thread(get_agent().cleanup_temp_files)
+            if n:
+                print(f"[cleanup] Removed {n} expired parquet file(s)")
+        except Exception as exc:
+            print(f"[cleanup] Parquet cleanup error: {exc}")
 # ─── Startup ──────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize the agent and start background cleanup tasks."""
-    # Import here so FastAPI starts fast and shows errors clearly
     from agent import get_agent
-
-    agent = get_agent()  # triggers ClickHouse connection check
-
-    # Background task: clean up expired Parquet files every 30 min
-    async def _cleanup_loop() -> None:
-        while True:
-            await asyncio.sleep(1800)
-            try:
-                n = await asyncio.to_thread(agent.cleanup_temp_files)
-                if n:
-                    print(f"[cleanup] Removed {n} expired parquet file(s)")
-            except Exception as exc:
-                print(f"[cleanup] Error: {exc}")
-
+    get_agent()  # warm up: connect to ClickHouse
     asyncio.create_task(_cleanup_loop())
-    print(f"✅ ClickHouse Analytics Agent API started | {SERVER_URL}")
-
-
-# ─── Health / Info endpoints ──────────────────────────────────────────────────
+    print(f"✅ ClickHouse Analytics Agent API v2 started | {SERVER_URL}")
+# ─── Health / Info ─────────────────────────────────────────────────────────────
 @app.get("/", summary="Health check")
 async def root():
-    return {
-        "status": "online",
-        "service": "ClickHouse Analytics Agent",
-        "version": "1.0.0",
-        "model": "Claude Sonnet 4.6 (via OpenRouter)",
-        "docs": f"{SERVER_URL}/docs",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
+    return {"status": "online", "service": "ClickHouse Analytics Agent", "version": "2.0.0"}
 @app.get("/health", summary="Health check for uptime monitors")
 async def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 @app.get("/api/info", summary="Service features")
-async def api_info():
+async def info():
     return {
         "service": "ClickHouse Analytics Agent",
-        "version": "1.0.0",
-        "model": "anthropic/claude-sonnet-4-6 via OpenRouter",
-        "framework": "LangGraph + SqliteSaver",
-        "features": [
-            "Запросы к ClickHouse с выгрузкой в Parquet",
-            "Анализ данных на Python (pandas / numpy)",
-            "Построение графиков (matplotlib / seaborn) → base64 PNG",
-            "История диалога: SqliteSaver (SQLite, per session_id)",
-            "Изоляция сессий — сессии не смешиваются",
-            "Рекламная аналитика: CTR, CPC, CPM, ROAS, CR, CPA",
-        ],
-        "timestamp": datetime.utcnow().isoformat(),
+        "version": "2.0.0",
+        "architecture": "async job queue",
+        "endpoints": {
+            "submit": "POST /api/analyze",
+            "poll":   "GET  /api/job/{job_id}",
+        },
     }
-
-
-@app.get("/api/chat-stats", summary="Database statistics")
-async def chat_stats():
-    """Return SQLite database statistics."""
-    import os
-    from config import DB_PATH
-
-    db_size = 0
-    if os.path.exists(DB_PATH):
-        db_size = round(os.path.getsize(DB_PATH) / (1024 * 1024), 3)
-
-    return {
-        "db_path": DB_PATH,
-        "db_size_mb": db_size,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-# ─── Session endpoints ────────────────────────────────────────────────────────
+# ─── Session endpoints ─────────────────────────────────────────────────────────
 @app.post("/api/session/new", summary="Create a new conversation session")
 async def new_session():
-    """
-    Generate a fresh session_id. Use this before the first message
-    to get an ID that ties the entire conversation together.
-    """
     session_id = str(uuid.uuid4())
     return {
         "session_id": session_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "message": "New session created",
     }
-
-
 @app.get("/api/session/{session_id}", summary="Get session metadata")
 async def get_session(session_id: str):
-    """Return how many messages are stored in this session."""
-    from agent import get_agent
-
-    agent = get_agent()
-    info = await asyncio.to_thread(agent.get_session_info, session_id)
-    return info
-
-
-# ─── Main analyze endpoint ────────────────────────────────────────────────────
-@app.post(
-    "/api/analyze",
-    response_model=AnalyzeResponse,
-    summary="Send an analytics query",
-    description=(
-        "Send a natural-language question or analytics request. "
-        "The agent queries ClickHouse, runs Python analysis, and returns "
-        "Markdown text + base64 PNG charts.\n\n"
-        "**session_id** — reuse the same value across messages to maintain context. "
-        "If omitted, a new session is created automatically."
-    ),
-)
-async def analyze(request: AnalyzeRequest):
-    """
-    Main endpoint. Body:
-    ```json
-    {
-      "query":      "Покажи CTR по кампаниям за январь 2025",
-      "session_id": "abc-123"   // optional; omit for a new session
+    # Count pending/running jobs for this session
+    active = [j for j in _jobs.values() if j["session_id"] == session_id and j["status"] in ("pending", "running")]
+    return {
+        "session_id": session_id,
+        "active_jobs": len(active),
     }
-    ```
+# ─── Main: submit query ────────────────────────────────────────────────────────
+@app.post("/api/analyze", response_model=SubmitResponse, summary="Submit an analytics query")
+async def analyze(req: AnalyzeRequest):
     """
-    query = request.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="'query' cannot be empty")
-
-    # Use provided session_id or generate a new one
-    session_id = (request.session_id or "").strip() or str(uuid.uuid4())
-
-    from agent import get_agent
-
-    agent = get_agent()
-
-    # Run the (synchronous) LangGraph agent in a thread pool so we don't
-    # block the FastAPI event loop while the agent calls the LLM + tools.
-    result = await asyncio.to_thread(agent.analyze, query, session_id)
-
-    result["timestamp"] = datetime.utcnow().isoformat()
-
-    if not result.get("success"):
-        # Return 500 but still include partial results (plots captured so far)
-        return JSONResponse(status_code=500, content=result)
-
-    return JSONResponse(content=result)
-
-
-# ─── Entrypoint ───────────────────────────────────────────────────────────────
+    Submit a query to the agent.
+    Returns job_id immediately — agent runs in background.
+    Poll GET /api/job/{job_id} to get the result.
+    """
+    session_id = req.session_id or str(uuid.uuid4())
+    job_id = _new_job(session_id=session_id, query=req.query)
+    # Fire and forget
+    asyncio.create_task(_run_agent_job(job_id))
+    return SubmitResponse(
+        job_id=job_id,
+        session_id=session_id,
+        status="pending",
+        message="Query accepted. Poll GET /api/job/{job_id} for result.",
+    )
+# ─── Poll job status ───────────────────────────────────────────────────────────
+@app.get("/api/job/{job_id}", response_model=JobStatusResponse, summary="Poll job status / get result")
+async def get_job(job_id: str):
+    """
+    Poll the status of a submitted job.
+    status: "pending" | "running" | "done" | "error"
+    When status == "done", text_output, plots, tool_calls are populated.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found (may have expired)")
+    resp = JobStatusResponse(
+        job_id=job["job_id"],
+        session_id=job["session_id"],
+        status=job["status"],
+        created_at=job["created_at"],
+        started_at=job["started_at"],
+        finished_at=job["finished_at"],
+        error=job["error"],
+    )
+    if job["status"] == "done" and job["result"]:
+        r = job["result"]
+        resp.success = r.get("success", True)
+        resp.text_output = r.get("text_output", "")
+        resp.plots = r.get("plots", [])
+        resp.tool_calls = r.get("tool_calls", [])
+        resp.error = r.get("error")
+    return resp
+# ─── Stats ────────────────────────────────────────────────────────────────────
+@app.get("/api/chat-stats", summary="Database statistics")
+async def chat_stats():
+    total = len(_jobs)
+    by_status = {}
+    for j in _jobs.values():
+        by_status[j["status"]] = by_status.get(j["status"], 0) + 1
+    return {"total_jobs_in_memory": total, "by_status": by_status}
+# ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(
-        f"""
-╔══════════════════════════════════════════════════════════════╗
-║       ClickHouse Analytics Agent API  v1.0                   ║
-║       Model : Claude Sonnet 4.6 via OpenRouter               ║
-║       Graph : LangGraph ReAct + SqliteSaver                  ║
-╚══════════════════════════════════════════════════════════════╝
-
-  Host  : {HOST}
-  Port  : {PORT}
-  Docs  : http://{HOST}:{PORT}/docs
-  Health: http://{HOST}:{PORT}/health
-"""
-    )
-    uvicorn.run(
-        "api_server:app",
-        host=HOST,
-        port=PORT,
-        reload=False,
-        log_level="info",
-    )
+    uvicorn.run("api_server:app", host=HOST, port=PORT, log_level="info")
