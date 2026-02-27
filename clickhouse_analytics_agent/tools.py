@@ -85,8 +85,8 @@ def clickhouse_query(sql: str) -> str:
 
 
 # ─── Tool 3: python_analysis ──────────────────────────────────────────────────
-@tool
-def python_analysis(code: str, parquet_path: str) -> str:
+@tool(response_format="content_and_artifact")
+def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
     """
     Execute Python code to analyze and visualize data from a ClickHouse query result.
 
@@ -121,19 +121,26 @@ def python_analysis(code: str, parquet_path: str) -> str:
     Args:
         code: Python code. Variable `df` already contains the DataFrame.
         parquet_path: Parquet file path returned by clickhouse_query (field: parquet_path).
+
+    Returns:
+        Tuple of (content, artifact) where:
+          - content: JSON string with success/output/result/error (sent to LLM)
+          - artifact: list of base64 PNG data URIs (stored in state, NOT sent to LLM)
     """
     try:
         result = _get_sandbox().execute(code=code, parquet_path=parquet_path)
-        return json.dumps(result, ensure_ascii=False, default=str)
+        plots: list[str] = result.pop("plots", [])
+        content = json.dumps(result, ensure_ascii=False, default=str)
+        return content, plots
     except Exception as exc:
         import traceback as tb
-        return json.dumps({
+        content = json.dumps({
             "success": False,
             "output": "",
             "result": None,
-            "plots": [],
             "error": f"{exc}\n{tb.format_exc()}",
         })
+        return content, []
 
 
 # ─── Exported list ────────────────────────────────────────────────────────────
