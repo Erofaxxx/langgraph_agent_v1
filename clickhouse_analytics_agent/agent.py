@@ -34,58 +34,6 @@ from config import (
 )
 from tools import TOOLS
 
-# ─── Message modifier: strip base64 plots before sending to LLM ───────────────
-
-def _build_prompt_modifier():
-    """
-    Returns a message modifier for create_react_agent's `prompt` parameter.
-
-    Before every LLM call, this function:
-      1. Prepends the system prompt.
-      2. Strips base64 PNG data from python_analysis ToolMessages to avoid
-         sending hundreds of kilobytes of image data as tokens.
-
-    The full plot data is still stored in the SQLite checkpoint and is
-    correctly extracted by _extract_plots() from the post-invoke state.
-    """
-    _system_msg = None  # lazy init after SYSTEM_PROMPT is defined
-
-    def modify(messages: list) -> list:
-        nonlocal _system_msg
-        if _system_msg is None:
-            _system_msg = SystemMessage(content=SYSTEM_PROMPT)
-
-        cleaned = []
-        for msg in messages:
-            if (
-                isinstance(msg, ToolMessage)
-                and getattr(msg, "name", "") == "python_analysis"
-            ):
-                try:
-                    data = json.loads(msg.content)
-                    if isinstance(data, dict) and data.get("plots"):
-                        n = len(data["plots"])
-                        data_clean = {
-                            **data,
-                            "plots": [
-                                f"[chart_{i + 1}: PNG rendered, base64 removed to save tokens]"
-                                for i in range(n)
-                            ],
-                        }
-                        msg = ToolMessage(
-                            content=json.dumps(data_clean, ensure_ascii=False),
-                            tool_call_id=msg.tool_call_id,
-                            name=msg.name,
-                        )
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-            cleaned.append(msg)
-
-        return [_system_msg] + cleaned
-
-    return modify
-
-
 # ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Ты — опытный аналитик рекламных данных. Ты работаешь с базой данных ClickHouse, которая содержит данные о рекламных кампаниях, визитах на сайт, витринах и маркетинговых метриках. Ты помогаешь маркетологам отвечать на вопросы, строить отчёты и считать ключевые показатели.
 
@@ -184,7 +132,7 @@ class AnalyticsAgent:
         self.graph = create_react_agent(
             model=self.llm,
             tools=TOOLS,
-            prompt=_build_prompt_modifier(),
+            prompt=SystemMessage(content=SYSTEM_PROMPT),
             checkpointer=self.memory,
         )
 
@@ -311,6 +259,9 @@ class AnalyticsAgent:
         """
         Extract base64 PNG plots from python_analysis ToolMessages
         that belong to the CURRENT agent run (after the last HumanMessage).
+
+        Plots are stored in ToolMessage.artifact (not in .content) so they
+        are never sent to the LLM, only kept in the checkpoint state for us.
         """
         # Find index of the most recently added HumanMessage
         last_human_idx = -1
@@ -328,12 +279,10 @@ class AnalyticsAgent:
             tool_name = getattr(msg, "name", "") or ""
             if tool_name != "python_analysis":
                 continue
-            try:
-                data = json.loads(msg.content)
-                if isinstance(data, dict) and data.get("plots"):
-                    plots.extend(data["plots"])
-            except (json.JSONDecodeError, AttributeError):
-                pass
+            # Plots are in .artifact (base64 list), NOT in .content
+            artifact = getattr(msg, "artifact", None)
+            if isinstance(artifact, list):
+                plots.extend(artifact)
 
         return plots
 
