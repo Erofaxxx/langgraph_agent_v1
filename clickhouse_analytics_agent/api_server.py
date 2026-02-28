@@ -112,8 +112,8 @@ async def _run_agent_job(job_id: str) -> None:
         from agent import get_agent
         agent = get_agent()
         result = await asyncio.to_thread(
-            agent.run,
-            query=job["query"],
+            agent.analyze,
+            user_query=job["query"],
             session_id=job["session_id"],
         )
         _set_done(job_id, result)
