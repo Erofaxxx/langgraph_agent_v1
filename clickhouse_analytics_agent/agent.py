@@ -55,11 +55,17 @@ def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
     try:
         if tool_name == "list_tables":
             data = json.loads(content)
-            # Drop column types — the LLM already used them to write SQL in that turn
-            compact = [
-                {"table": t["table"], "columns": [c["name"] for c in t.get("columns", [])]}
-                for t in data
-            ]
+            # Normalise to plain column-name lists.
+            # Handles both old format (columns: [{"name": ..., "type": ...}])
+            # and new format (columns: ["col1", "col2", ...]) for checkpoint compat.
+            compact = []
+            for t in data:
+                cols = t.get("columns", [])
+                if cols and isinstance(cols[0], dict):
+                    col_names = [c["name"] for c in cols]
+                else:
+                    col_names = cols
+                compact.append({"table": t["table"], "columns": col_names})
             new_content = json.dumps(compact, ensure_ascii=False)
 
         elif tool_name == "clickhouse_query":
@@ -107,6 +113,9 @@ def _build_messages_for_llm(state: dict) -> list:
     Prepare the message list for each LLM call:
       1. Prepend system prompt (not stored in the checkpoint).
       2. Compress ToolMessages from previous turns to reduce token usage.
+      3. Compress "used" ToolMessages within the current turn — those already
+         followed by another AIMessage with tool_calls. The most recent
+         ToolMessage is always kept uncompressed so the LLM sees full data.
 
     The SqliteSaver checkpoint always stores the full content — compression
     only affects what is actually sent to the model.
@@ -119,10 +128,28 @@ def _build_messages_for_llm(state: dict) -> list:
         if isinstance(msg, HumanMessage):
             current_turn_start = i
 
+    # Within the current turn, find the last AIMessage that issued tool calls.
+    # Any ToolMessage that appears BEFORE this index has already been consumed
+    # by the LLM and can be safely compressed to save tokens.
+    last_tool_calling_ai_idx = -1
+    for i in range(len(messages) - 1, current_turn_start - 1, -1):
+        m = messages[i]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            last_tool_calling_ai_idx = i
+            break
+
     compressed: list = []
     for i, msg in enumerate(messages):
-        if i < current_turn_start and isinstance(msg, ToolMessage):
-            compressed.append(_compress_tool_message(msg))
+        if isinstance(msg, ToolMessage):
+            if i < current_turn_start:
+                # Previous turns — always compress
+                compressed.append(_compress_tool_message(msg))
+            elif last_tool_calling_ai_idx > i:
+                # Current turn, already consumed (LLM made another tool call after this) — compress
+                compressed.append(_compress_tool_message(msg))
+            else:
+                # Current turn, most recent result — keep full
+                compressed.append(msg)
         else:
             compressed.append(msg)
 

@@ -70,21 +70,24 @@ class ClickHouseClient:
 
     def list_tables(self) -> list[dict]:
         """
-        Return all tables in the current database with columns and their ClickHouse types.
-        Result: [{"table": "visits", "columns": [{"name": "id", "type": "UInt64"}, ...]}, ...]
+        Return all tables in the current database with column names only (no types).
+        Result: [{"table": "visits", "columns": ["id", "date", ...]}, ...]
+
+        Types are omitted to reduce token usage (~64% smaller response).
+        The model can infer types from column names or run a LIMIT 0 query if needed.
         """
         result = self.client.query(
-            "SELECT table, name, type "
+            "SELECT table, name "
             "FROM system.columns "
             "WHERE database = currentDatabase() "
             "ORDER BY table, position"
         )
         tables: dict[str, list] = {}
         for row in result.result_rows:
-            table_name, col_name, col_type = row[0], row[1], row[2]
+            table_name, col_name = row[0], row[1]
             if table_name not in tables:
                 tables[table_name] = []
-            tables[table_name].append({"name": col_name, "type": col_type})
+            tables[table_name].append(col_name)
         return [{"table": t, "columns": cols} for t, cols in tables.items()]
 
     def execute_query(self, sql: str, limit: int = 50000) -> dict:

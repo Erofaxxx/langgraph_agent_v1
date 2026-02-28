@@ -38,13 +38,14 @@ def _get_sandbox():
 @tool
 def list_tables() -> str:
     """
-    Get the list of ALL tables in the ClickHouse database with their columns and data types.
+    Get the list of ALL tables in the ClickHouse database with their column names.
 
     Call this FIRST at the beginning of a new session to understand the data schema.
     Skip if you already know the structure from the conversation context.
+    If you need exact column types, run: SELECT name, type FROM system.columns WHERE table='...' LIMIT 100
 
     Returns: JSON array of objects like:
-      [{"table": "visits", "columns": [{"name": "date", "type": "Date"}, ...]}, ...]
+      [{"table": "visits", "columns": ["date", "session_id", "revenue", ...]}, ...]
     """
     try:
         tables = _get_ch_client().list_tables()
