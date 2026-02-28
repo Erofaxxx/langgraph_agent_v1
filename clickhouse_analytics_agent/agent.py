@@ -16,6 +16,7 @@ Session isolation:
 import json
 import time
 import sqlite3
+from copy import copy
 from typing import Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -33,6 +34,100 @@ from config import (
     TEMP_FILE_TTL_SECONDS,
 )
 from tools import TOOLS
+
+# ─── Context compression helpers ──────────────────────────────────────────────
+
+def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
+    """
+    Replace a ToolMessage's content with a compact version.
+
+    Called only for ToolMessages from PREVIOUS turns so the LLM receives
+    minimal but sufficient information about past tool results.
+
+    Compression strategy per tool:
+      list_tables    → keep table+column names, drop types   (~60–70% smaller)
+      clickhouse_query → keep metadata only, drop preview rows (~40–50% smaller)
+      python_analysis  → keep result summary only, drop stdout  (~50–80% smaller)
+    """
+    tool_name = getattr(msg, "name", "") or ""
+    content = msg.content
+
+    try:
+        if tool_name == "list_tables":
+            data = json.loads(content)
+            # Drop column types — the LLM already used them to write SQL in that turn
+            compact = [
+                {"table": t["table"], "columns": [c["name"] for c in t.get("columns", [])]}
+                for t in data
+            ]
+            new_content = json.dumps(compact, ensure_ascii=False)
+
+        elif tool_name == "clickhouse_query":
+            data = json.loads(content)
+            # Drop preview_first_5_rows and dtypes — already analysed in this turn
+            new_content = json.dumps(
+                {
+                    "success": data.get("success"),
+                    "row_count": data.get("row_count"),
+                    "columns": data.get("columns"),
+                    "parquet_path": data.get("parquet_path"),
+                },
+                ensure_ascii=False,
+            )
+
+        elif tool_name == "python_analysis":
+            data = json.loads(content)
+            # Drop stdout logs — keep only the final result (capped at 500 chars)
+            result_text = data.get("result") or ""
+            new_content = json.dumps(
+                {
+                    "success": data.get("success"),
+                    "result": result_text[:500] + ("…" if len(result_text) > 500 else ""),
+                },
+                ensure_ascii=False,
+            )
+
+        else:
+            return msg
+
+    except Exception:
+        # If parsing fails, return the original message unchanged
+        return msg
+
+    try:
+        return msg.model_copy(update={"content": new_content})
+    except Exception:
+        new_msg = copy(msg)
+        new_msg.content = new_content
+        return new_msg
+
+
+def _build_messages_for_llm(state: dict) -> list:
+    """
+    Prepare the message list for each LLM call:
+      1. Prepend system prompt (not stored in the checkpoint).
+      2. Compress ToolMessages from previous turns to reduce token usage.
+
+    The SqliteSaver checkpoint always stores the full content — compression
+    only affects what is actually sent to the model.
+    """
+    messages = state.get("messages", [])
+
+    # Find the start of the current turn (index of the last HumanMessage)
+    current_turn_start = 0
+    for i, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            current_turn_start = i
+
+    compressed: list = []
+    for i, msg in enumerate(messages):
+        if i < current_turn_start and isinstance(msg, ToolMessage):
+            compressed.append(_compress_tool_message(msg))
+        else:
+            compressed.append(msg)
+
+    return [SystemMessage(content=SYSTEM_PROMPT)] + compressed
+
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Ты — опытный аналитик рекламных данных. Ты работаешь с базой данных ClickHouse, которая содержит данные о рекламных кампаниях, визитах на сайт, витринах и маркетинговых метриках. Ты помогаешь маркетологам отвечать на вопросы, строить отчёты и считать ключевые показатели.
@@ -127,12 +222,13 @@ class AnalyticsAgent:
 
 
         # ── LangGraph ReAct agent ─────────────────────────────────────────
-        # state_modifier prepends the system prompt before every LLM call
-        # (not stored in the checkpoint — safe and clean).
+        # _build_messages_for_llm is called before every LLM invocation:
+        #   • prepends the system prompt (not stored in checkpoint)
+        #   • compresses ToolMessages from previous turns to cut token usage
         self.graph = create_react_agent(
             model=self.llm,
             tools=TOOLS,
-            prompt=SystemMessage(content=SYSTEM_PROMPT),
+            prompt=_build_messages_for_llm,
             checkpointer=self.memory,
         )
 
