@@ -48,7 +48,7 @@ def list_tables() -> str:
     """
     try:
         tables = _get_ch_client().list_tables()
-        return json.dumps(tables, ensure_ascii=False, indent=2)
+        return json.dumps(tables, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
