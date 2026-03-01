@@ -248,33 +248,23 @@ _OPENROUTER_HEADERS = {
 
 def _create_llm():
     """
-    Return the appropriate LangChain LLM based on MODEL_PROVIDER.
+    Return a ChatOpenAI client pointed at OpenRouter for the selected model.
 
-    anthropic → ChatAnthropic via OpenRouter.
-                Supports Anthropic content-block format, so cache_control
-                markers in SystemMessage are forwarded to the API correctly.
+    OpenRouter exposes a single OpenAI-compatible endpoint for all providers.
+    ChatAnthropic is NOT used because OpenRouter does not implement the native
+    Anthropic API (/v1/messages) — only the OpenAI format (/v1/chat/completions).
 
-    deepseek  → ChatOpenAI via OpenRouter (current behaviour, unchanged).
-                No prompt caching — DeepSeek doesn't offer it.
+    Prompt caching for Claude models is still supported: OpenRouter forwards
+    cache_control blocks found in message content to Anthropic transparently.
+    The is_anthropic flag in the agent controls whether those blocks are added.
     """
-    if MODEL_PROVIDER == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(
-            model=MODEL,
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            max_tokens=MAX_TOKENS,
-            default_headers=_OPENROUTER_HEADERS,
-        )
-    else:
-        # deepseek (and any future OpenAI-compatible provider)
-        return ChatOpenAI(
-            model=MODEL,
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            max_tokens=MAX_TOKENS,
-            default_headers=_OPENROUTER_HEADERS,
-        )
+    return ChatOpenAI(
+        model=MODEL,
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        max_tokens=MAX_TOKENS,
+        default_headers=_OPENROUTER_HEADERS,
+    )
 
 
 class AnalyticsAgent:
