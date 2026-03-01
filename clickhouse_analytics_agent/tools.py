@@ -40,8 +40,10 @@ def list_tables() -> str:
     """
     Get the list of ALL tables in the ClickHouse database with their column names.
 
-    Call this FIRST at the beginning of a new session to understand the data schema.
-    Skip if you already know the structure from the conversation context.
+    NOTE: The schema is already embedded in your system prompt — do NOT call this
+    at the start of a session. Use it only if a table seems missing or the embedded
+    schema appears incomplete.
+
     If you need exact column types, run: SELECT name, type FROM system.columns WHERE table='...' LIMIT 100
 
     Returns: JSON array of objects like:
@@ -135,11 +137,12 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
         return content, plots
     except Exception as exc:
         import traceback as tb
+        full_tb = f"{exc}\n{tb.format_exc()}"
         content = json.dumps({
             "success": False,
             "output": "",
             "result": None,
-            "error": f"{exc}\n{tb.format_exc()}",
+            "error": full_tb[-1500:] if len(full_tb) > 1500 else full_tb,
         })
         return content, []
 

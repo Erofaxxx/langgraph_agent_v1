@@ -13,7 +13,18 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # ─── OpenRouter ──────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
-MODEL: str = os.environ.get("MODEL", "anthropic/claude-sonnet-4-6")
+
+# Which provider to use: "anthropic" (Claude, supports prompt caching)
+#                     or "deepseek"  (DeepSeek, no caching, cheaper)
+MODEL_PROVIDER: str = os.environ.get("MODEL_PROVIDER", "anthropic")
+
+# Default model name per provider — can be overridden via MODEL env var.
+_PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-6",
+    "deepseek":  "deepseek/deepseek-chat",
+}
+MODEL: str = os.environ.get("MODEL", _PROVIDER_DEFAULT_MODELS.get(MODEL_PROVIDER, "claude-sonnet-4-6"))
+
 MAX_TOKENS: int = int(os.environ.get("MAX_TOKENS", "8192"))
 
 # ─── ClickHouse ──────────────────────────────────────────────────────────────
@@ -51,3 +62,6 @@ DB_PATH: str = str(BASE_DIR / "chat_history.db")
 # ─── Limits ───────────────────────────────────────────────────────────────────
 MAX_AGENT_ITERATIONS: int = int(os.environ.get("MAX_AGENT_ITERATIONS", "15"))
 TEMP_FILE_TTL_SECONDS: int = int(os.environ.get("TEMP_FILE_TTL_SECONDS", "3600"))  # 1 hour
+# How many past HumanMessage turns to keep in context (sliding window).
+# Older turns are dropped; current turn is always kept in full.
+MAX_HISTORY_TURNS: int = int(os.environ.get("MAX_HISTORY_TURNS", "10"))
