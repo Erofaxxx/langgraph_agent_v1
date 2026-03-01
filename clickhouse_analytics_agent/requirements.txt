@@ -3,7 +3,8 @@ langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=3.0.0  # SqliteSaver (moved out of langgraph core in 0.2+)
 langchain>=0.3.0
 langchain-core>=0.3.0
-langchain-openai>=0.2.0          # ChatOpenAI adapter (used for OpenRouter)
+langchain-openai>=0.2.0          # ChatOpenAI adapter (DeepSeek via OpenRouter)
+langchain-anthropic>=0.3.0       # ChatAnthropic adapter (Claude via OpenRouter, supports cache_control)
 
 # ─── ClickHouse ───────────────────────────────────────────────────────────────
 clickhouse-connect>=0.7.0         # Official Python ClickHouse HTTP driver

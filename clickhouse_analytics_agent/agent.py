@@ -36,6 +36,7 @@ from config import (
     MAX_HISTORY_TURNS,
     MAX_TOKENS,
     MODEL,
+    MODEL_PROVIDER,
     OPENROUTER_API_KEY,
     TEMP_DIR,
     TEMP_FILE_TTL_SECONDS,
@@ -237,10 +238,49 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
 """
 
 
+# ─── LLM factory ──────────────────────────────────────────────────────────────
+
+_OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://server.asktab.ru",
+    "X-Title": "ClickHouse Analytics Agent",
+}
+
+
+def _create_llm():
+    """
+    Return the appropriate LangChain LLM based on MODEL_PROVIDER.
+
+    anthropic → ChatAnthropic via OpenRouter.
+                Supports Anthropic content-block format, so cache_control
+                markers in SystemMessage are forwarded to the API correctly.
+
+    deepseek  → ChatOpenAI via OpenRouter (current behaviour, unchanged).
+                No prompt caching — DeepSeek doesn't offer it.
+    """
+    if MODEL_PROVIDER == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model=MODEL,
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+            max_tokens=MAX_TOKENS,
+            default_headers=_OPENROUTER_HEADERS,
+        )
+    else:
+        # deepseek (and any future OpenAI-compatible provider)
+        return ChatOpenAI(
+            model=MODEL,
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+            max_tokens=MAX_TOKENS,
+            default_headers=_OPENROUTER_HEADERS,
+        )
+
+
 class AnalyticsAgent:
     """
     Wraps LangGraph ReAct agent with:
-      - Claude Sonnet 4.6 via OpenRouter
+      - Claude Sonnet 4.6 (prompt caching) or DeepSeek, both via OpenRouter
       - SqliteSaver for session memory
       - Dynamic system prompt with embedded DB schema (fetched once at startup)
       - Per-request context optimisation: sliding window + AIMessage/ToolMessage compression
@@ -254,16 +294,7 @@ class AnalyticsAgent:
             )
 
         # ── LLM via OpenRouter ────────────────────────────────────────────
-        self.llm = ChatOpenAI(
-            model=MODEL,
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            max_tokens=MAX_TOKENS,
-            default_headers={
-                "HTTP-Referer": "https://server.asktab.ru",
-                "X-Title": "ClickHouse Analytics Agent",
-            },
-        )
+        self.llm = _create_llm()
 
         # ── SqliteSaver checkpointer ──────────────────────────────────────
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
@@ -274,13 +305,19 @@ class AnalyticsAgent:
         # This eliminates the list_tables round-trip on every new session.
         system_prompt = self._build_system_prompt()
 
-        # ── Message builder closure (captures system_prompt) ──────────────
+        # ── Message builder closure (captures system_prompt + provider) ───
         # Passed to create_react_agent as `prompt=` so it runs before every
         # LLM call.  Applies three optimisations:
         #   1. Sliding window — keep only last MAX_HISTORY_TURNS human turns.
         #   2. AIMessage compression — strip reasoning text from old turns
         #      while preserving tool_calls (required for graph integrity).
         #   3. ToolMessage compression — keep metadata, drop heavy payloads.
+        #
+        # SystemMessage format differs by provider:
+        #   anthropic → content block list with cache_control (prompt caching)
+        #   deepseek  → plain string (OpenAI-compatible, no caching)
+        is_anthropic = MODEL_PROVIDER == "anthropic"
+
         def _build_messages(state: dict) -> list:
             messages = state.get("messages", [])
 
@@ -337,7 +374,26 @@ class AnalyticsAgent:
                 else:
                     compressed.append(msg)
 
-            return [SystemMessage(content=system_prompt)] + compressed
+            # For Anthropic: wrap system prompt in a content block and mark it
+            # as a cache breakpoint.  The entire system prompt (including the
+            # embedded schema) is static across all calls, so it's the ideal
+            # cache candidate — repeated calls in the same session pay only
+            # for cache-read tokens (10× cheaper than input tokens).
+            #
+            # For DeepSeek (and other OpenAI-compatible providers): plain
+            # string — cache_control is not supported.
+            if is_anthropic:
+                system_msg = SystemMessage(content=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ])
+            else:
+                system_msg = SystemMessage(content=system_prompt)
+
+            return [system_msg] + compressed
 
         # ── LangGraph ReAct agent ─────────────────────────────────────────
         self.graph = create_react_agent(
@@ -347,7 +403,8 @@ class AnalyticsAgent:
             checkpointer=self.memory,
         )
 
-        print(f"✅ AnalyticsAgent ready | model: {MODEL} | db: {DB_PATH}")
+        caching_info = "prompt caching ON" if is_anthropic else "no prompt caching"
+        print(f"✅ AnalyticsAgent ready | provider: {MODEL_PROVIDER} | model: {MODEL} | {caching_info} | db: {DB_PATH}")
 
     # ─── System prompt builder ─────────────────────────────────────────────────
 
