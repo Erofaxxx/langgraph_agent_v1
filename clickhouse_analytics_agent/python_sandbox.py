@@ -126,7 +126,10 @@ class PythonSandbox:
             }
 
         except Exception as exc:
-            error_text = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+            # Keep only the last 1 500 chars of the traceback — the tail contains
+            # the actual error line and is sufficient for the LLM to self-correct.
+            full_tb = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+            error_text = full_tb[-1500:] if len(full_tb) > 1500 else full_tb
             return {
                 "success": False,
                 "output": stdout_capture.getvalue(),

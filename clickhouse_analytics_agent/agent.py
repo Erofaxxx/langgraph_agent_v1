@@ -5,12 +5,18 @@ Architecture:
   - LLM  : Claude Sonnet 4.6 via OpenRouter (ChatOpenAI adapter)
   - Graph : LangGraph create_react_agent (tool-calling loop)
   - Memory: SqliteSaver checkpointer — persists full conversation per session_id
-  - Tools : list_tables, clickhouse_query, python_analysis
+  - Tools : list_tables (fallback), clickhouse_query, python_analysis
 
 Session isolation:
   Every API request carries a session_id (= LangGraph thread_id).
   SqliteSaver stores the message state keyed by thread_id.
   Multiple concurrent sessions do NOT interfere with each other.
+
+Context optimisations (in _build_messages, a per-instance closure):
+  1. Static schema embedded in system prompt at startup — no list_tables round-trip.
+  2. Sliding window: only last MAX_HISTORY_TURNS human turns kept in context.
+  3. ToolMessage compression for previous turns (keeps metadata, drops heavy payload).
+  4. AIMessage compression: strips reasoning text from old turns, keeps tool_calls.
 """
 
 import json
@@ -27,6 +33,7 @@ from langgraph.prebuilt import create_react_agent
 from config import (
     DB_PATH,
     MAX_AGENT_ITERATIONS,
+    MAX_HISTORY_TURNS,
     MAX_TOKENS,
     MODEL,
     OPENROUTER_API_KEY,
@@ -108,59 +115,38 @@ def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
         return new_msg
 
 
-def _build_messages_for_llm(state: dict) -> list:
+def _build_schema_block(tables: list[dict]) -> str:
     """
-    Prepare the message list for each LLM call:
-      1. Prepend system prompt (not stored in the checkpoint).
-      2. Compress ToolMessages from previous turns to reduce token usage.
-      3. Compress "used" ToolMessages within the current turn — those already
-         followed by another AIMessage with tool_calls. The most recent
-         ToolMessage is always kept uncompressed so the LLM sees full data.
+    Format a list of {table, columns} dicts into a compact schema section
+    for embedding in the system prompt.
 
-    The SqliteSaver checkpoint always stores the full content — compression
-    only affects what is actually sent to the model.
+    Example output:
+      **orders**: id, user_id, date, amount, status
+      **sessions**: id, date, utm_source, utm_medium, revenue
     """
-    messages = state.get("messages", [])
-
-    # Find the start of the current turn (index of the last HumanMessage)
-    current_turn_start = 0
-    for i, msg in enumerate(messages):
-        if isinstance(msg, HumanMessage):
-            current_turn_start = i
-
-    # Within the current turn, find the last AIMessage that issued tool calls.
-    # Any ToolMessage that appears BEFORE this index has already been consumed
-    # by the LLM and can be safely compressed to save tokens.
-    last_tool_calling_ai_idx = -1
-    for i in range(len(messages) - 1, current_turn_start - 1, -1):
-        m = messages[i]
-        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            last_tool_calling_ai_idx = i
-            break
-
-    compressed: list = []
-    for i, msg in enumerate(messages):
-        if isinstance(msg, ToolMessage):
-            if i < current_turn_start:
-                # Previous turns — always compress
-                compressed.append(_compress_tool_message(msg))
-            elif last_tool_calling_ai_idx > i:
-                # Current turn, already consumed (LLM made another tool call after this) — compress
-                compressed.append(_compress_tool_message(msg))
-            else:
-                # Current turn, most recent result — keep full
-                compressed.append(msg)
+    lines = []
+    for t in tables:
+        cols = t.get("columns", [])
+        # columns may be a list of strings or list of dicts (legacy)
+        if cols and isinstance(cols[0], dict):
+            col_names = [c["name"] for c in cols]
         else:
-            compressed.append(msg)
+            col_names = [str(c) for c in cols]
+        lines.append(f"**{t['table']}**: {', '.join(col_names)}")
+    return "\n".join(lines)
 
-    return [SystemMessage(content=SYSTEM_PROMPT)] + compressed
 
+# ─── System Prompt template ────────────────────────────────────────────────────
+# {schema_section} is filled at agent startup with the live schema or a fallback.
 
-# ─── System Prompt ────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Ты — лучший в мире аналитик рекламных данных. Работаешь с ClickHouse-базой компании.
+_SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик рекламных данных. Работаешь с ClickHouse-базой компании.
 Твоя задача — отвечать на вопросы маркетолога по данным: трафик, покупки, кампании, поведение клиентов.
 
 Стиль работы: ты находишься внутри рабочего процесса — маркетолог работает с данными каждый день, задаёт много вопросов подряд, возвращается к предыдущим темам, уточняет. Ты часть этого потока, не разовый отчёт. Отвечай коротко и по делу — как коллега, который уже в контексте.
+
+## Схема базы данных
+
+{schema_section}
 
 ### Принцип работы
 Ты ведёшь расследование, а не отвечаешь на изолированные вопросы. Держи нить:
@@ -180,11 +166,10 @@ SYSTEM_PROMPT = """Ты — лучший в мире аналитик рекла
 - Drill-down ("разбери", "детализируй") → полная детализация уместна
 - Уточнение к предыдущему → сначала проверь, можно ли ответить из уже выгруженных данных; в базу — только если нет
 
-### 2. Изучить схему (ТОЛЬКО при первом запросе в сессии)
+### 2. Схема таблиц
 
-Если структура таблиц ещё неизвестна — вызови `list_tables`.
-
-Если она уже известна из истории диалога — ПРОПУСТИ этот шаг.
+Схема базы данных уже предоставлена в начале этого промпта — НЕ вызывай `list_tables`.
+Используй `list_tables` только если схема кажется неполной или таблица не найдена.
 
 ### 3. Выгрузить данные из ClickHouse
 Вызови `clickhouse_query` с оптимальным SQL:
@@ -232,7 +217,7 @@ SYSTEM_PROMPT = """Ты — лучший в мире аналитик рекла
 2. ВСЕГДА устанавливай `result` (Markdown строка с итогом)
 3. Используй print() для логирования шагов: print("📊 Шаг 1: ...")
 4. Подписывай графики на РУССКОМ: plt.title(), plt.xlabel(), plt.ylabel()
-5. Форматируй числа: f"{value:,.0f}" (целые), f"{value:,.2f}" (дробные)
+5. Форматируй числа: f"{{value:,.0f}}" (целые), f"{{value:,.2f}}" (дробные)
 6. Обрабатывай пропуски: df.dropna() или df.fillna(0)
 7. Для каждого графика — plt.tight_layout() перед следующим
 8. График строй ТОЛЬКО если он явно нужен по типу вопроса (см. шаг 4) — не по умолчанию
@@ -257,7 +242,8 @@ class AnalyticsAgent:
     Wraps LangGraph ReAct agent with:
       - Claude Sonnet 4.6 via OpenRouter
       - SqliteSaver for session memory
-      - Helper methods to extract plots and tool-call logs from agent output
+      - Dynamic system prompt with embedded DB schema (fetched once at startup)
+      - Per-request context optimisation: sliding window + AIMessage/ToolMessage compression
     """
 
     def __init__(self) -> None:
@@ -280,24 +266,113 @@ class AnalyticsAgent:
         )
 
         # ── SqliteSaver checkpointer ──────────────────────────────────────
-        # Keeps conversation state per thread_id (= session_id).
-        # Thread-safe for concurrent requests.
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         self.memory = SqliteSaver(conn)
 
+        # ── Embed static schema into system prompt ────────────────────────
+        # Tables don't change at runtime, so fetching once at startup is safe.
+        # This eliminates the list_tables round-trip on every new session.
+        system_prompt = self._build_system_prompt()
+
+        # ── Message builder closure (captures system_prompt) ──────────────
+        # Passed to create_react_agent as `prompt=` so it runs before every
+        # LLM call.  Applies three optimisations:
+        #   1. Sliding window — keep only last MAX_HISTORY_TURNS human turns.
+        #   2. AIMessage compression — strip reasoning text from old turns
+        #      while preserving tool_calls (required for graph integrity).
+        #   3. ToolMessage compression — keep metadata, drop heavy payloads.
+        def _build_messages(state: dict) -> list:
+            messages = state.get("messages", [])
+
+            # ── 1. Sliding window ──────────────────────────────────────────
+            human_indices = [
+                i for i, m in enumerate(messages) if isinstance(m, HumanMessage)
+            ]
+            if len(human_indices) > MAX_HISTORY_TURNS:
+                cutoff = human_indices[-MAX_HISTORY_TURNS]
+                messages = messages[cutoff:]
+
+            # ── Locate current-turn boundary ──────────────────────────────
+            # current_turn_start = index of the last HumanMessage (in the
+            # possibly-sliced list).
+            current_turn_start = 0
+            for i, msg in enumerate(messages):
+                if isinstance(msg, HumanMessage):
+                    current_turn_start = i
+
+            # Within the current turn: the last AIMessage that issued tool
+            # calls.  ToolMessages before it have already been consumed and
+            # can be safely compressed.
+            last_tool_calling_ai_idx = -1
+            for i in range(len(messages) - 1, current_turn_start - 1, -1):
+                m = messages[i]
+                if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                    last_tool_calling_ai_idx = i
+                    break
+
+            # ── 2 & 3. Compress old messages ──────────────────────────────
+            compressed: list = []
+            for i, msg in enumerate(messages):
+                if isinstance(msg, ToolMessage):
+                    if i < current_turn_start or last_tool_calling_ai_idx > i:
+                        compressed.append(_compress_tool_message(msg))
+                    else:
+                        compressed.append(msg)
+
+                elif isinstance(msg, AIMessage) and i < current_turn_start:
+                    # Previous turns: keep tool_calls (graph needs them to
+                    # pair with ToolMessages), but drop the reasoning text
+                    # which can be thousands of tokens and is no longer useful.
+                    if getattr(msg, "tool_calls", None):
+                        try:
+                            compressed.append(msg.model_copy(update={"content": ""}))
+                        except Exception:
+                            new_msg = copy(msg)
+                            new_msg.content = ""
+                            compressed.append(new_msg)
+                    else:
+                        # Final answer to user — keep as conversation context
+                        compressed.append(msg)
+
+                else:
+                    compressed.append(msg)
+
+            return [SystemMessage(content=system_prompt)] + compressed
 
         # ── LangGraph ReAct agent ─────────────────────────────────────────
-        # _build_messages_for_llm is called before every LLM invocation:
-        #   • prepends the system prompt (not stored in checkpoint)
-        #   • compresses ToolMessages from previous turns to cut token usage
         self.graph = create_react_agent(
             model=self.llm,
             tools=TOOLS,
-            prompt=_build_messages_for_llm,
+            prompt=_build_messages,
             checkpointer=self.memory,
         )
 
         print(f"✅ AnalyticsAgent ready | model: {MODEL} | db: {DB_PATH}")
+
+    # ─── System prompt builder ─────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        """
+        Fetch the DB schema and embed it into the system prompt.
+        Falls back to a generic notice if ClickHouse is unreachable.
+        """
+        try:
+            from tools import _get_ch_client
+            tables = _get_ch_client().list_tables()
+            schema_block = _build_schema_block(tables)
+            schema_section = (
+                "Схема таблиц (статичная, загружена при старте агента):\n\n"
+                + schema_block
+            )
+            print(f"✅ Schema loaded: {len(tables)} table(s) embedded in system prompt")
+        except Exception as exc:
+            schema_section = (
+                "Схема недоступна при старте. "
+                "Используй инструмент `list_tables` чтобы получить список таблиц."
+            )
+            print(f"⚠️  Could not fetch schema at startup: {exc}")
+
+        return _SYSTEM_PROMPT_TEMPLATE.format(schema_section=schema_section)
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -323,8 +398,6 @@ class AnalyticsAgent:
         config = {"configurable": {"thread_id": session_id}}
 
         try:
-            # LangGraph invoke — sends only the NEW message;
-            # history is loaded automatically from SqliteSaver by thread_id.
             result = self.graph.invoke(
                 {"messages": [HumanMessage(content=user_query)]},
                 config=config,
@@ -363,7 +436,6 @@ class AnalyticsAgent:
             config = {"configurable": {"thread_id": session_id}}
             state = self.graph.get_state(config)
             msgs = state.values.get("messages", []) if state and state.values else []
-            # Count only user-visible exchanges (HumanMessage + AIMessage pairs)
             user_msgs = sum(1 for m in msgs if isinstance(m, HumanMessage))
             return {
                 "session_id": session_id,
@@ -404,7 +476,6 @@ class AnalyticsAgent:
             content = msg.content
             if isinstance(content, str) and content.strip():
                 return content
-            # Some models return list of content blocks
             if isinstance(content, list):
                 parts = [
                     block["text"]
@@ -420,11 +491,7 @@ class AnalyticsAgent:
         """
         Extract base64 PNG plots from python_analysis ToolMessages
         that belong to the CURRENT agent run (after the last HumanMessage).
-
-        Plots are stored in ToolMessage.artifact (not in .content) so they
-        are never sent to the LLM, only kept in the checkpoint state for us.
         """
-        # Find index of the most recently added HumanMessage
         last_human_idx = -1
         for i, msg in enumerate(messages):
             if isinstance(msg, HumanMessage):
@@ -437,10 +504,8 @@ class AnalyticsAgent:
         for msg in messages[last_human_idx:]:
             if not isinstance(msg, ToolMessage):
                 continue
-            tool_name = getattr(msg, "name", "") or ""
-            if tool_name != "python_analysis":
+            if (getattr(msg, "name", "") or "") != "python_analysis":
                 continue
-            # Plots are in .artifact (base64 list), NOT in .content
             artifact = getattr(msg, "artifact", None)
             if isinstance(artifact, list):
                 plots.extend(artifact)
@@ -448,9 +513,7 @@ class AnalyticsAgent:
         return plots
 
     def _extract_tool_calls(self, messages: list) -> list[dict]:
-        """
-        Extract a compact log of tool calls made during the current run.
-        """
+        """Extract a compact log of tool calls made during the current run."""
         last_human_idx = -1
         for i, msg in enumerate(messages):
             if isinstance(msg, HumanMessage):
@@ -466,7 +529,6 @@ class AnalyticsAgent:
             for tc in getattr(msg, "tool_calls", []):
                 name = tc.get("name", "")
                 args = tc.get("args", {})
-                # Truncate large args for the log
                 compact_args = {
                     k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v)
                     for k, v in args.items()

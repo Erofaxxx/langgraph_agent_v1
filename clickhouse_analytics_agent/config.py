@@ -51,3 +51,6 @@ DB_PATH: str = str(BASE_DIR / "chat_history.db")
 # ─── Limits ───────────────────────────────────────────────────────────────────
 MAX_AGENT_ITERATIONS: int = int(os.environ.get("MAX_AGENT_ITERATIONS", "15"))
 TEMP_FILE_TTL_SECONDS: int = int(os.environ.get("TEMP_FILE_TTL_SECONDS", "3600"))  # 1 hour
+# How many past HumanMessage turns to keep in context (sliding window).
+# Older turns are dropped; current turn is always kept in full.
+MAX_HISTORY_TURNS: int = int(os.environ.get("MAX_HISTORY_TURNS", "10"))
