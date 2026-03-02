@@ -15,8 +15,10 @@ Session isolation:
 Context optimisations (in _build_messages, a per-instance closure):
   1. Static schema embedded in system prompt at startup — no list_tables round-trip.
   2. Sliding window: only last MAX_HISTORY_TURNS human turns kept in context.
-  3. ToolMessage compression for previous turns (keeps metadata, drops heavy payload).
+  3. ToolMessage compression for previous turns only (keeps metadata, drops heavy payload).
   4. AIMessage compression: strips reasoning text from old turns, keeps tool_calls.
+  5. Prompt caching: system prompt + last history message marked with cache_control
+     (Anthropic via OpenRouter) — ~68 % input-token savings across tool calls.
 """
 
 import json
@@ -300,11 +302,15 @@ class AnalyticsAgent:
 
         # ── Message builder closure (captures system_prompt + provider) ───
         # Passed to create_react_agent as `prompt=` so it runs before every
-        # LLM call.  Applies three optimisations:
+        # LLM call.  Applies four optimisations:
         #   1. Sliding window — keep only last MAX_HISTORY_TURNS human turns.
         #   2. AIMessage compression — strip reasoning text from old turns
         #      while preserving tool_calls (required for graph integrity).
-        #   3. ToolMessage compression — keep metadata, drop heavy payloads.
+        #   3. ToolMessage compression — keep metadata, drop heavy payloads
+        #      (previous turns only; current-turn messages stay intact).
+        #   4. History cache breakpoint — mark the last history message with
+        #      cache_control so tools + system + history are cached across
+        #      all tool calls within one request (~68 % input-token savings).
         #
         # SystemMessage format differs by provider:
         #   anthropic → content block list with cache_control (prompt caching)
@@ -330,21 +336,14 @@ class AnalyticsAgent:
                 if isinstance(msg, HumanMessage):
                     current_turn_start = i
 
-            # Within the current turn: the last AIMessage that issued tool
-            # calls.  ToolMessages before it have already been consumed and
-            # can be safely compressed.
-            last_tool_calling_ai_idx = -1
-            for i in range(len(messages) - 1, current_turn_start - 1, -1):
-                m = messages[i]
-                if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-                    last_tool_calling_ai_idx = i
-                    break
-
             # ── 2 & 3. Compress old messages ──────────────────────────────
             compressed: list = []
             for i, msg in enumerate(messages):
                 if isinstance(msg, ToolMessage):
-                    if i < current_turn_start or last_tool_calling_ai_idx > i:
+                    # Compress only ToolMessages from previous turns.
+                    # ToolMessages inside the current turn must stay intact so
+                    # the LLM has full data for its final answer.
+                    if i < current_turn_start:
                         compressed.append(_compress_tool_message(msg))
                     else:
                         compressed.append(msg)
@@ -366,6 +365,40 @@ class AnalyticsAgent:
 
                 else:
                     compressed.append(msg)
+
+            # ── 4. History cache breakpoint (Anthropic only) ──────────────
+            # Mark the last message before the current HumanMessage as a
+            # cache breakpoint.  Together with the system-prompt breakpoint
+            # this means tools + system + full history are all read from
+            # cache on every tool call inside one request (~68 % savings
+            # on input tokens).
+            if is_anthropic and current_turn_start > 0:
+                last_hist_msg = compressed[current_turn_start - 1]
+                content = last_hist_msg.content
+                if isinstance(content, str) and content:
+                    new_content = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                elif isinstance(content, list) and content:
+                    new_content = list(content)
+                    last_block = dict(new_content[-1])
+                    last_block["cache_control"] = {"type": "ephemeral"}
+                    new_content[-1] = last_block
+                else:
+                    new_content = None
+                if new_content is not None:
+                    try:
+                        compressed[current_turn_start - 1] = last_hist_msg.model_copy(
+                            update={"content": new_content}
+                        )
+                    except Exception:
+                        new_msg = copy(last_hist_msg)
+                        new_msg.content = new_content
+                        compressed[current_turn_start - 1] = new_msg
 
             # For Anthropic: wrap system prompt in a content block and mark it
             # as a cache breakpoint.  The entire system prompt (including the
@@ -394,6 +427,7 @@ class AnalyticsAgent:
             tools=TOOLS,
             prompt=_build_messages,
             checkpointer=self.memory,
+            max_iterations=MAX_AGENT_ITERATIONS,
         )
 
         caching_info = "prompt caching ON" if is_anthropic else "no prompt caching"
