@@ -427,7 +427,6 @@ class AnalyticsAgent:
             tools=TOOLS,
             prompt=_build_messages,
             checkpointer=self.memory,
-            max_iterations=MAX_AGENT_ITERATIONS,
         )
 
         caching_info = "prompt caching ON" if is_anthropic else "no prompt caching"
@@ -479,7 +478,7 @@ class AnalyticsAgent:
               "error":      str | None,
             }
         """
-        config = {"configurable": {"thread_id": session_id}}
+        config = {"configurable": {"thread_id": session_id}, "recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1}
 
         try:
             result = self.graph.invoke(
