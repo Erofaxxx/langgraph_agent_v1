@@ -15,8 +15,14 @@ Session isolation:
 Context optimisations (in _build_messages, a per-instance closure):
   1. Static schema embedded in system prompt at startup — no list_tables round-trip.
   2. Sliding window: only last MAX_HISTORY_TURNS human turns kept in context.
-  3. ToolMessage compression for previous turns only (keeps metadata, drops heavy payload).
-  4. AIMessage compression: strips reasoning text from old turns, keeps tool_calls.
+  3. Turn summarisation: each previous turn's internal tool-call chain (AIMessage+
+     tool_calls + ToolMessages) is replaced by a compact SQL/row-count AIMessage.
+     The final agent answer (shown to user) is preserved verbatim.
+     Tool chain: ~830 tokens → ~50 tokens; final answer kept as-is.
+  4. Intra-turn ToolMessage compression: within the current request, once
+     python_analysis has been called, preceding clickhouse_query ToolMessages have
+     their dtypes + preview_first_5_rows stripped.  Also drops stdout from earlier
+     python_analysis runs in a retry scenario.
   5. Prompt caching: system prompt + last history message marked with cache_control
      (Anthropic via OpenRouter) — ~68 % input-token savings across tool calls.
 """
@@ -116,6 +122,117 @@ def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
         new_msg = copy(msg)
         new_msg.content = new_content
         return new_msg
+
+
+def _group_into_turns(messages: list) -> list[list]:
+    """
+    Split a flat message list into per-turn sublists.
+
+    Each turn starts with a HumanMessage.  Messages that appear before the
+    first HumanMessage (unusual but possible) form their own leading group.
+    """
+    turns: list[list] = []
+    current: list = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            if current:
+                turns.append(current)
+            current = [msg]
+        else:
+            current.append(msg)
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _summarize_previous_turn(turn_msgs: list) -> list:
+    """
+    Compress a previous turn's internal tool-call chain while keeping the
+    final agent answer intact.
+
+    Returns one of:
+      [HumanMessage, AIMessage(tool_summary), AIMessage(final_answer)]  — tools used
+      [HumanMessage, AIMessage(final_answer)]                           — no tools
+      [HumanMessage]                                                    — no answer yet
+
+    Only the "internal" machinery is compressed:
+      AIMessage(tool_calls=[clickhouse_query/python_analysis]) → dropped
+      ToolMessage(query result / analysis output)              → dropped
+
+    The final AIMessage — the one shown to the user in the UI — is preserved
+    verbatim so the LLM has full context for drill-down follow-ups.
+
+    The OpenAI-compatible API requires no pairing of tool_calls with tool
+    messages in historical context.  Removing both together leaves a clean
+    role-alternating sequence the API accepts without errors.
+
+    Typical token profile per turn (10-column table, 200-token final answer):
+      Before: HumanMessage + tool chain  ≈ 830 tokens + final answer ≈ 200 tokens
+      After:  HumanMessage + tool_summary ≈ 50 tokens + final answer ≈ 200 tokens
+    """
+    human_msg: HumanMessage | None = None
+    sql_snippet = ""
+    row_info = ""
+    final_ai_msg: AIMessage | None = None
+
+    for msg in turn_msgs:
+        if isinstance(msg, HumanMessage):
+            human_msg = msg
+
+        elif isinstance(msg, AIMessage):
+            # Compact: extract SQL from tool_calls (internal machinery).
+            for tc in getattr(msg, "tool_calls", []):
+                if tc.get("name") == "clickhouse_query" and not sql_snippet:
+                    sql = (tc.get("args") or {}).get("sql", "")
+                    if sql:
+                        sql_snippet = sql[:120] + ("…" if len(sql) > 120 else "")
+
+            # Keep: identify the final answer (AIMessage without tool_calls).
+            if not getattr(msg, "tool_calls", None):
+                content = msg.content
+                has_text = (isinstance(content, str) and content.strip()) or (
+                    isinstance(content, list)
+                    and any(
+                        isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
+                        for b in content
+                    )
+                )
+                if has_text:
+                    final_ai_msg = msg  # last non-tool AIMessage wins
+
+        elif isinstance(msg, ToolMessage):
+            # Compact: extract just the row count (small metadata).
+            try:
+                data = json.loads(msg.content)
+                if (getattr(msg, "name", "") or "") == "clickhouse_query" and not row_info:
+                    rc = data.get("row_count")
+                    cols = data.get("columns") or []
+                    row_info = f"{rc} rows" if rc is not None else ""
+                    if cols:
+                        row_info += f", cols: {', '.join(str(c) for c in cols[:6])}"
+            except Exception:
+                pass
+
+    result: list = []
+    if human_msg is not None:
+        result.append(human_msg)
+
+    # Compact tool-chain summary (only added when tools were actually called).
+    tool_parts: list[str] = []
+    if sql_snippet:
+        tool_parts.append(f"SQL: {sql_snippet}")
+    if row_info:
+        tool_parts.append(row_info)
+    if tool_parts:
+        result.append(AIMessage(content=" | ".join(tool_parts)))
+
+    # Full final answer — kept verbatim, not truncated.
+    if final_ai_msg is not None:
+        result.append(final_ai_msg)
+
+    return result if result else [AIMessage(content="—")]
 
 
 def _build_schema_block(tables: list[dict]) -> str:
@@ -302,15 +419,29 @@ class AnalyticsAgent:
 
         # ── Message builder closure (captures system_prompt + provider) ───
         # Passed to create_react_agent as `prompt=` so it runs before every
-        # LLM call.  Applies four optimisations:
-        #   1. Sliding window — keep only last MAX_HISTORY_TURNS human turns.
-        #   2. AIMessage compression — strip reasoning text from old turns
-        #      while preserving tool_calls (required for graph integrity).
-        #   3. ToolMessage compression — keep metadata, drop heavy payloads
-        #      (previous turns only; current-turn messages stay intact).
-        #   4. History cache breakpoint — mark the last history message with
-        #      cache_control so tools + system + history are cached across
-        #      all tool calls within one request (~68 % input-token savings).
+        # LLM call.  Applies four layered optimisations:
+        #
+        #   1. Sliding window — keep only the last MAX_HISTORY_TURNS human turns.
+        #
+        #   2. Turn summarisation — each previous turn's internal tool-call
+        #      chain (AIMessage+tool_calls and ToolMessages) is replaced by a
+        #      compact AIMessage containing only the SQL snippet and row count
+        #      (~50 tokens).  The final agent answer (shown to the user in the
+        #      UI) is kept verbatim as a separate AIMessage so the LLM has full
+        #      context for drill-down follow-ups.
+        #      The OpenAI API requires no pairing between tool_calls and tool
+        #      messages in historical context — removing both together is valid.
+        #
+        #   3. Intra-turn ToolMessage compression — within the CURRENT request,
+        #      once python_analysis has been called, strip dtypes + preview from
+        #      preceding clickhouse_query results (already used to write the
+        #      Python code, not needed for the final answer).  Also strips stdout
+        #      from earlier python_analysis runs in a retry scenario.
+        #
+        #   4. Prompt caching (Anthropic only) — system prompt and the last
+        #      history message are marked with cache_control so the entire
+        #      [system + history] prefix is read from cache on every tool call
+        #      within one request (~68 % input-token savings).
         #
         # SystemMessage format differs by provider:
         #   anthropic → content block list with cache_control (prompt caching)
@@ -329,54 +460,55 @@ class AnalyticsAgent:
                 messages = messages[cutoff:]
 
             # ── Locate current-turn boundary ──────────────────────────────
-            # current_turn_start = index of the last HumanMessage (in the
-            # possibly-sliced list).
+            # current_turn_start = index of the last HumanMessage.
             current_turn_start = 0
             for i, msg in enumerate(messages):
                 if isinstance(msg, HumanMessage):
                     current_turn_start = i
 
-            # ── 2 & 3. Compress old messages ──────────────────────────────
-            compressed: list = []
-            for i, msg in enumerate(messages):
-                if isinstance(msg, ToolMessage):
-                    # Compress only ToolMessages from previous turns.
-                    # ToolMessages inside the current turn must stay intact so
-                    # the LLM has full data for its final answer.
-                    if i < current_turn_start:
-                        compressed.append(_compress_tool_message(msg))
-                    else:
-                        compressed.append(msg)
+            # ── 2. Summarise previous turns ────────────────────────────────
+            # Replace each past turn's tool-call chain with a compact
+            # [HumanMessage, AIMessage(summary)] pair.
+            prev_turns = _group_into_turns(messages[:current_turn_start])
+            compressed_prev: list = []
+            for turn in prev_turns:
+                compressed_prev.extend(_summarize_previous_turn(turn))
 
-                elif isinstance(msg, AIMessage) and i < current_turn_start:
-                    # Previous turns: keep tool_calls (graph needs them to
-                    # pair with ToolMessages), but drop the reasoning text
-                    # which can be thousands of tokens and is no longer useful.
-                    if getattr(msg, "tool_calls", None):
-                        try:
-                            compressed.append(msg.model_copy(update={"content": ""}))
-                        except Exception:
-                            new_msg = copy(msg)
-                            new_msg.content = ""
-                            compressed.append(new_msg)
-                    else:
-                        # Final answer to user — keep as conversation context
-                        compressed.append(msg)
-
+            # ── 3. Intra-turn ToolMessage compression ──────────────────────
+            # Within the current request, once python_analysis has been called,
+            # the preceding clickhouse_query result's heavy fields (dtypes,
+            # preview_first_5_rows) are no longer needed for the next LLM call.
+            # Similarly, an earlier python_analysis stdout can be dropped when
+            # a retry follows it.
+            # Condition: compress msg[i] if ANY python_analysis ToolMessage
+            # exists at index j > i in the current turn.
+            current_msgs = messages[current_turn_start:]
+            py_positions: set[int] = {
+                i
+                for i, m in enumerate(current_msgs)
+                if isinstance(m, ToolMessage)
+                and (getattr(m, "name", "") or "") == "python_analysis"
+            }
+            compressed_current: list = []
+            for i, msg in enumerate(current_msgs):
+                if (
+                    isinstance(msg, ToolMessage)
+                    and (getattr(msg, "name", "") or "") in ("clickhouse_query", "python_analysis")
+                    and any(j > i for j in py_positions)
+                ):
+                    compressed_current.append(_compress_tool_message(msg))
                 else:
-                    compressed.append(msg)
+                    compressed_current.append(msg)
 
             # ── 4. History cache breakpoint (Anthropic only) ──────────────
-            # Mark the last message before the current HumanMessage as a
-            # cache breakpoint.  Together with the system-prompt breakpoint
-            # this means tools + system + full history are all read from
-            # cache on every tool call inside one request (~68 % savings
-            # on input tokens).
-            if is_anthropic and current_turn_start > 0:
-                last_hist_msg = compressed[current_turn_start - 1]
+            # Mark the last summary message before the current turn with
+            # cache_control.  Anthropic caches [system + compressed history]
+            # and reads it from cache on every tool call in the same request.
+            if is_anthropic and compressed_prev:
+                last_hist_msg = compressed_prev[-1]
                 content = last_hist_msg.content
                 if isinstance(content, str) and content:
-                    new_content = [
+                    new_content: list | None = [
                         {
                             "type": "text",
                             "text": content,
@@ -392,22 +524,15 @@ class AnalyticsAgent:
                     new_content = None
                 if new_content is not None:
                     try:
-                        compressed[current_turn_start - 1] = last_hist_msg.model_copy(
+                        compressed_prev[-1] = last_hist_msg.model_copy(
                             update={"content": new_content}
                         )
                     except Exception:
                         new_msg = copy(last_hist_msg)
                         new_msg.content = new_content
-                        compressed[current_turn_start - 1] = new_msg
+                        compressed_prev[-1] = new_msg
 
-            # For Anthropic: wrap system prompt in a content block and mark it
-            # as a cache breakpoint.  The entire system prompt (including the
-            # embedded schema) is static across all calls, so it's the ideal
-            # cache candidate — repeated calls in the same session pay only
-            # for cache-read tokens (10× cheaper than input tokens).
-            #
-            # For DeepSeek (and other OpenAI-compatible providers): plain
-            # string — cache_control is not supported.
+            # System prompt: cached block for Anthropic, plain string otherwise.
             if is_anthropic:
                 system_msg = SystemMessage(content=[
                     {
@@ -419,7 +544,7 @@ class AnalyticsAgent:
             else:
                 system_msg = SystemMessage(content=system_prompt)
 
-            return [system_msg] + compressed
+            return [system_msg] + compressed_prev + compressed_current
 
         # ── LangGraph ReAct agent ─────────────────────────────────────────
         self.graph = create_react_agent(

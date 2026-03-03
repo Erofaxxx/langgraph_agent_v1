@@ -60,25 +60,13 @@ def list_tables() -> str:
 @tool
 def clickhouse_query(sql: str) -> str:
     """
-    Execute a SELECT SQL query against ClickHouse.
+    Execute a SELECT query against ClickHouse.
 
-    Returns JSON with:
-      - row_count: total rows fetched
-      - columns: list of column names
-      - dtypes: pandas dtypes of each column
-      - preview_first_5_rows: first 5 rows as list of dicts
-      - parquet_path: path to the saved Parquet file (pass this to python_analysis)
-
-    IMPORTANT RULES:
-    1. Only SELECT queries are allowed (no INSERT / UPDATE / DELETE / DROP).
-    2. Always add a LIMIT — use 1000–10000 for analysis, up to 50000 for large exports.
-    3. Push aggregations (SUM, COUNT, AVG, GROUP BY) into SQL — ClickHouse is extremely fast.
-    4. For Array-type columns use arrayJoin() to explode them if needed.
-    5. Save the parquet_path from the response; you MUST pass it to python_analysis.
-    6. If you need the table size first, do: SELECT count() FROM table_name LIMIT 1.
+    Returns JSON: row_count, columns, dtypes, preview_first_5_rows, parquet_path.
+    Pass parquet_path to python_analysis. SELECT only; always include LIMIT.
 
     Args:
-        sql: A valid ClickHouse SELECT statement.
+        sql: ClickHouse SELECT statement.
     """
     try:
         result = _get_ch_client().execute_query(sql)
@@ -91,44 +79,21 @@ def clickhouse_query(sql: str) -> str:
 @tool(response_format="content_and_artifact")
 def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
     """
-    Execute Python code to analyze and visualize data from a ClickHouse query result.
+    Execute Python to analyze data from a ClickHouse query result.
 
-    The data is pre-loaded from the Parquet file and available as `df` (pandas DataFrame).
-    DO NOT call pd.read_parquet() in your code — `df` is already loaded.
+    `df` (pandas DataFrame) is pre-loaded — do NOT call pd.read_parquet().
+    Available: df, pd, np, plt, sns, result=None.
 
-    Available variables in the execution context:
-      - df  (pd.DataFrame) — the data from ClickHouse
-      - pd  (pandas)
-      - np  (numpy)
-      - plt (matplotlib.pyplot)
-      - sns (seaborn)
-      - result (None) — set this to a string for the final text/Markdown output
-
-    CODE RULES:
-    1. Set `result` to a Markdown string for the final text output shown to the user.
-       Example: result = "## Sales\\n| Month | Revenue |\\n|..."
-    2. Use print() for intermediate logging (e.g., print("Step 1: calculating CTR...")).
-    3. Build charts with plt/sns — ALL matplotlib figures are automatically captured as PNG.
-    4. Label chart titles, axes, and legends IN RUSSIAN.
-    5. Format numbers with thousands separators: f"{value:,.0f}" or f"{value:,.2f}".
-    6. Handle missing data: df.dropna() or df.fillna(0) before calculations.
-    7. If the code raises an error, fix it and retry — do not abort the analysis.
-
-    Advertising metrics to calculate when relevant:
-      CTR  = clicks / impressions * 100
-      CPC  = spend / clicks
-      CPM  = spend / impressions * 1000
-      ROAS = revenue / spend * 100
-      CR   = conversions / clicks * 100
+    Rules:
+    1. Set `result` to a Markdown string (shown to the user).
+    2. Use print() for intermediate logging.
+    3. All matplotlib figures are auto-captured as PNG.
+    4. Label charts in Russian; format numbers with thousands separators.
+    5. Handle missing data before calculations.
 
     Args:
-        code: Python code. Variable `df` already contains the DataFrame.
-        parquet_path: Parquet file path returned by clickhouse_query (field: parquet_path).
-
-    Returns:
-        Tuple of (content, artifact) where:
-          - content: JSON string with success/output/result/error (sent to LLM)
-          - artifact: list of base64 PNG data URIs (stored in state, NOT sent to LLM)
+        code: Python code. `df` is already loaded.
+        parquet_path: Returned by clickhouse_query.
     """
     try:
         result = _get_sandbox().execute(code=code, parquet_path=parquet_path)
