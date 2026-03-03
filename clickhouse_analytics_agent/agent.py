@@ -15,9 +15,14 @@ Session isolation:
 Context optimisations (in _build_messages, a per-instance closure):
   1. Static schema embedded in system prompt at startup — no list_tables round-trip.
   2. Sliding window: only last MAX_HISTORY_TURNS human turns kept in context.
-  3. ToolMessage compression for previous turns only (keeps metadata, drops heavy payload).
-  4. AIMessage compression: strips reasoning text from old turns, keeps tool_calls.
-  5. Prompt caching: system prompt + last history message marked with cache_control
+  3. ToolMessage compression for previous turns (keeps metadata, drops heavy payload).
+  4. Intra-turn ToolMessage compression: within the current request, once
+     python_analysis has been called, preceding clickhouse_query ToolMessages have
+     their dtypes + preview_first_5_rows stripped (they were only needed for writing
+     the Python code, not for the final answer).  Also compresses earlier
+     python_analysis ToolMessages when a retry is detected.
+  5. AIMessage compression: strips reasoning text from old turns, keeps tool_calls.
+  6. Prompt caching: system prompt + last history message marked with cache_control
      (Anthropic via OpenRouter) — ~68 % input-token savings across tool calls.
 """
 
@@ -302,15 +307,21 @@ class AnalyticsAgent:
 
         # ── Message builder closure (captures system_prompt + provider) ───
         # Passed to create_react_agent as `prompt=` so it runs before every
-        # LLM call.  Applies four optimisations:
+        # LLM call.  Applies five optimisations:
         #   1. Sliding window — keep only last MAX_HISTORY_TURNS human turns.
         #   2. AIMessage compression — strip reasoning text from old turns
         #      while preserving tool_calls (required for graph integrity).
         #   3. ToolMessage compression — keep metadata, drop heavy payloads
-        #      (previous turns only; current-turn messages stay intact).
+        #      for ALL previous-turn messages.
+        #   3b. Intra-turn ToolMessage compression — within the current
+        #      request, once python_analysis has been called, strip
+        #      dtypes + preview from preceding clickhouse_query results, and
+        #      drop stdout from earlier python_analysis retries.  This cuts
+        #      tokens on the final-answer LLM call without losing any data
+        #      the model still needs.
         #   4. History cache breakpoint — mark the last history message with
-        #      cache_control so tools + system + history are cached across
-        #      all tool calls within one request (~68 % input-token savings).
+        #      cache_control so system + history are cached across all tool
+        #      calls within one request (~68 % input-token savings).
         #
         # SystemMessage format differs by provider:
         #   anthropic → content block list with cache_control (prompt caching)
@@ -336,16 +347,47 @@ class AnalyticsAgent:
                 if isinstance(msg, HumanMessage):
                     current_turn_start = i
 
-            # ── 2 & 3. Compress old messages ──────────────────────────────
+            # ── Precompute intra-turn python_analysis positions ────────────
+            # Used to decide which current-turn ToolMessages can be compressed
+            # mid-request (before the final answer LLM call):
+            #   • clickhouse_query: dtypes + preview_first_5_rows can be dropped
+            #     once python_analysis has consumed the data.  The parquet file
+            #     path and metadata are still kept.
+            #   • python_analysis: output (stdout) can be dropped when an earlier
+            #     attempt is superseded by a later retry.
+            # We compress msg[i] if ANY python_analysis ToolMessage exists at
+            # index j > i within the current turn.
+            python_analysis_positions_in_turn: set[int] = {
+                i
+                for i, msg in enumerate(messages)
+                if i >= current_turn_start
+                and isinstance(msg, ToolMessage)
+                and (getattr(msg, "name", "") or "") == "python_analysis"
+            }
+
+            # ── 2, 3 & 3b. Compress messages ──────────────────────────────
             compressed: list = []
             for i, msg in enumerate(messages):
                 if isinstance(msg, ToolMessage):
-                    # Compress only ToolMessages from previous turns.
-                    # ToolMessages inside the current turn must stay intact so
-                    # the LLM has full data for its final answer.
+                    tool_name = getattr(msg, "name", "") or ""
+
                     if i < current_turn_start:
+                        # Previous turns: always compress (drops heavy payloads,
+                        # keeps only metadata / result summary).
                         compressed.append(_compress_tool_message(msg))
+
+                    elif tool_name in ("clickhouse_query", "python_analysis") and any(
+                        j > i for j in python_analysis_positions_in_turn
+                    ):
+                        # Intra-turn compression: a later python_analysis call
+                        # means this tool's heavy payload is no longer needed for
+                        # the upcoming LLM call.
+                        #   clickhouse_query → drop dtypes + preview_first_5_rows
+                        #   python_analysis  → drop output/stdout (retry scenario)
+                        compressed.append(_compress_tool_message(msg))
+
                     else:
+                        # Current-turn message still needed in full.
                         compressed.append(msg)
 
                 elif isinstance(msg, AIMessage) and i < current_turn_start:
