@@ -15,8 +15,10 @@ Session isolation:
 Context optimisations (in _build_messages, a per-instance closure):
   1. Static schema embedded in system prompt at startup — no list_tables round-trip.
   2. Sliding window: only last MAX_HISTORY_TURNS human turns kept in context.
-  3. Turn summarisation: each completed previous turn's tool-call chain is replaced
-     by a single compact summary AIMessage (~830 tokens/turn → ~80 tokens, 90 % off).
+  3. Turn summarisation: each previous turn's internal tool-call chain (AIMessage+
+     tool_calls + ToolMessages) is replaced by a compact SQL/row-count AIMessage.
+     The final agent answer (shown to user) is preserved verbatim.
+     Tool chain: ~830 tokens → ~50 tokens; final answer kept as-is.
   4. Intra-turn ToolMessage compression: within the current request, once
      python_analysis has been called, preceding clickhouse_query ToolMessages have
      their dtypes + preview_first_5_rows stripped.  Also drops stdout from earlier
@@ -145,89 +147,92 @@ def _group_into_turns(messages: list) -> list[list]:
 
 def _summarize_previous_turn(turn_msgs: list) -> list:
     """
-    Compress a completed previous turn into [HumanMessage, AIMessage(summary)].
+    Compress a previous turn's internal tool-call chain while keeping the
+    final agent answer intact.
 
-    Replaces the tool-call chain (AIMessage+tool_calls + ToolMessages + intermediate
-    AIMessages) with a single compact summary AIMessage.  Keeps the original
-    HumanMessage so the user/assistant role structure stays intact.
+    Returns one of:
+      [HumanMessage, AIMessage(tool_summary), AIMessage(final_answer)]  — tools used
+      [HumanMessage, AIMessage(final_answer)]                           — no tools
+      [HumanMessage]                                                    — no answer yet
 
-    The OpenAI-compatible API requires no pairing of tool_calls with tool messages
-    in the compressed history — removing both the AIMessage(tool_calls) and the
-    ToolMessages together leaves a clean conversation with no orphaned references.
+    Only the "internal" machinery is compressed:
+      AIMessage(tool_calls=[clickhouse_query/python_analysis]) → dropped
+      ToolMessage(query result / analysis output)              → dropped
 
-    Typical token reduction per turn:
-      Before: HumanMessage + 4 tool-chain messages  ≈ 830 tokens
-      After:  HumanMessage + 1 summary AIMessage    ≈  80 tokens  (90 % smaller)
+    The final AIMessage — the one shown to the user in the UI — is preserved
+    verbatim so the LLM has full context for drill-down follow-ups.
 
-    Summary content:
-      • First SQL query (≤ 120 chars)
-      • Row count + column list from clickhouse_query result
-      • Analysis result (≤ 300 chars) or final answer (≤ 300 chars)
+    The OpenAI-compatible API requires no pairing of tool_calls with tool
+    messages in historical context.  Removing both together leaves a clean
+    role-alternating sequence the API accepts without errors.
+
+    Typical token profile per turn (10-column table, 200-token final answer):
+      Before: HumanMessage + tool chain  ≈ 830 tokens + final answer ≈ 200 tokens
+      After:  HumanMessage + tool_summary ≈ 50 tokens + final answer ≈ 200 tokens
     """
     human_msg: HumanMessage | None = None
     sql_snippet = ""
     row_info = ""
-    analysis_result = ""
-    final_answer = ""
+    final_ai_msg: AIMessage | None = None
 
     for msg in turn_msgs:
         if isinstance(msg, HumanMessage):
             human_msg = msg
 
         elif isinstance(msg, AIMessage):
-            # Extract the SQL from the first clickhouse_query tool_call.
+            # Compact: extract SQL from tool_calls (internal machinery).
             for tc in getattr(msg, "tool_calls", []):
                 if tc.get("name") == "clickhouse_query" and not sql_snippet:
                     sql = (tc.get("args") or {}).get("sql", "")
                     if sql:
                         sql_snippet = sql[:120] + ("…" if len(sql) > 120 else "")
 
-            # Capture the final answer (AIMessage without tool_calls).
-            if not getattr(msg, "tool_calls", None) and not final_answer:
+            # Keep: identify the final answer (AIMessage without tool_calls).
+            if not getattr(msg, "tool_calls", None):
                 content = msg.content
-                if isinstance(content, str) and content.strip():
-                    text = content.strip()
-                    final_answer = text[:300] + ("…" if len(text) > 300 else "")
-                elif isinstance(content, list):
-                    texts = [
-                        b.get("text", "")
+                has_text = (isinstance(content, str) and content.strip()) or (
+                    isinstance(content, list)
+                    and any(
+                        isinstance(b, dict)
+                        and b.get("type") == "text"
+                        and b.get("text", "").strip()
                         for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ]
-                    text = "\n".join(texts).strip()
-                    if text:
-                        final_answer = text[:300] + ("…" if len(text) > 300 else "")
+                    )
+                )
+                if has_text:
+                    final_ai_msg = msg  # last non-tool AIMessage wins
 
         elif isinstance(msg, ToolMessage):
+            # Compact: extract just the row count (small metadata).
             try:
                 data = json.loads(msg.content)
-                tool_name = getattr(msg, "name", "") or ""
-                if tool_name == "clickhouse_query" and not row_info:
+                if (getattr(msg, "name", "") or "") == "clickhouse_query" and not row_info:
                     rc = data.get("row_count")
                     cols = data.get("columns") or []
-                    row_info = (f"{rc} rows" if rc is not None else "")
+                    row_info = f"{rc} rows" if rc is not None else ""
                     if cols:
                         row_info += f", cols: {', '.join(str(c) for c in cols[:6])}"
-                elif tool_name == "python_analysis" and not analysis_result:
-                    res = (data.get("result") or "").strip()
-                    if res:
-                        analysis_result = res[:300] + ("…" if len(res) > 300 else "")
             except Exception:
                 pass
 
-    # Build the compact summary string.
-    parts: list[str] = []
-    if sql_snippet:
-        parts.append(f"SQL: {sql_snippet}")
-    if row_info:
-        parts.append(row_info)
-    context = analysis_result or final_answer
-    if context:
-        parts.append(context)
-    summary = " | ".join(parts) if parts else "—"
+    result: list = []
+    if human_msg is not None:
+        result.append(human_msg)
 
-    summary_msg = AIMessage(content=summary)
-    return [human_msg, summary_msg] if human_msg is not None else [summary_msg]
+    # Compact tool-chain summary (only added when tools were actually called).
+    tool_parts: list[str] = []
+    if sql_snippet:
+        tool_parts.append(f"SQL: {sql_snippet}")
+    if row_info:
+        tool_parts.append(row_info)
+    if tool_parts:
+        result.append(AIMessage(content=" | ".join(tool_parts)))
+
+    # Full final answer — kept verbatim, not truncated.
+    if final_ai_msg is not None:
+        result.append(final_ai_msg)
+
+    return result if result else [AIMessage(content="—")]
 
 
 def _build_schema_block(tables: list[dict]) -> str:
@@ -418,12 +423,12 @@ class AnalyticsAgent:
         #
         #   1. Sliding window — keep only the last MAX_HISTORY_TURNS human turns.
         #
-        #   2. Turn summarisation — each completed previous turn's tool-call
-        #      chain (AIMessage+tool_calls, ToolMessages, intermediate AIMessages)
-        #      is replaced with a single compact summary AIMessage that contains
-        #      the SQL snippet, row count, and analysis result.  The original
-        #      HumanMessage is preserved for conversation role structure.
-        #      Typical reduction: ~830 tokens/turn → ~80 tokens/turn (90 %).
+        #   2. Turn summarisation — each previous turn's internal tool-call
+        #      chain (AIMessage+tool_calls and ToolMessages) is replaced by a
+        #      compact AIMessage containing only the SQL snippet and row count
+        #      (~50 tokens).  The final agent answer (shown to the user in the
+        #      UI) is kept verbatim as a separate AIMessage so the LLM has full
+        #      context for drill-down follow-ups.
         #      The OpenAI API requires no pairing between tool_calls and tool
         #      messages in historical context — removing both together is valid.
         #
