@@ -90,7 +90,7 @@ class ClickHouseClient:
             tables[table_name].append(col_name)
         return [{"table": t, "columns": cols} for t, cols in tables.items()]
 
-    def execute_query(self, sql: str, limit: int = 50000) -> dict:
+    def execute_query(self, sql: str, limit: int = 500000) -> dict:
         """
         Execute a SELECT query.
         1. Validates it starts with SELECT.
