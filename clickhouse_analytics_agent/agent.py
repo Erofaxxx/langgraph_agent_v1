@@ -450,14 +450,30 @@ def _create_llm():
     Prompt caching for Claude models is still supported: OpenRouter forwards
     cache_control blocks found in message content to Anthropic transparently.
     The is_anthropic flag in the agent controls whether those blocks are added.
+
+    For Anthropic: OpenRouter is pinned to a single Anthropic provider instance
+    via the `provider` request field.  Without pinning, OpenRouter may
+    round-robin across multiple Anthropic endpoints; different instances do NOT
+    share the prompt cache, so every tool call within the same request would be
+    a cache miss despite correct cache_control placement.
     """
-    return ChatOpenAI(
+    kwargs: dict = dict(
         model=MODEL,
         api_key=OPENROUTER_API_KEY,
         base_url="https://openrouter.ai/api/v1",
         max_tokens=MAX_TOKENS,
         default_headers=_OPENROUTER_HEADERS,
     )
+    if MODEL_PROVIDER == "anthropic":
+        kwargs["model_kwargs"] = {
+            "extra_body": {
+                "provider": {
+                    "order": ["Anthropic"],
+                    "allow_fallbacks": False,
+                },
+            },
+        }
+    return ChatOpenAI(**kwargs)
 
 
 class AnalyticsAgent:
@@ -509,10 +525,12 @@ class AnalyticsAgent:
         #      Python code, not needed for the final answer).  Also strips stdout
         #      from earlier python_analysis runs in a retry scenario.
         #
-        #   4. Prompt caching (Anthropic only) — system prompt and the last
-        #      history message are marked with cache_control so the entire
-        #      [system + history] prefix is read from cache on every tool call
-        #      within one request (~68 % input-token savings).
+        #   4. Prompt caching (Anthropic only) — three cache breakpoints:
+        #      a) system prompt, b) last compressed-history message, c) current
+        #      HumanMessage (original text only, counter block is uncached).
+        #      Breakpoints (a) and (b) cover [system + history]; breakpoint (c)
+        #      additionally caches the user's question across all tool calls
+        #      within the same turn (~68 %+ input-token savings).
         #
         # SystemMessage format differs by provider:
         #   anthropic → content block list with cache_control (prompt caching)
@@ -571,28 +589,63 @@ class AnalyticsAgent:
                 else:
                     compressed_current.append(msg)
 
-            # ── 3b. Iteration counter — appended to current HumanMessage ──
-            # The counter tells the LLM how many tool calls remain so it can
-            # decide whether to make another query or finalize the answer.
+            # ── 3b. Iteration counter + HumanMessage cache breakpoint ──────
+            # The counter tells the LLM how many tool calls remain.
             # We modify only the local copy — the checkpoint is never touched.
+            #
+            # For Anthropic: the current HumanMessage is converted to a
+            # content-block list so its original text is marked with
+            # cache_control (third breakpoint after system + last history).
+            # This caches the user's question across ALL tool calls within the
+            # same turn — a new cache entry is established on the very first
+            # LLM call and hits on every subsequent call.
+            # The iteration counter is appended as a separate uncached block
+            # so it can change without invalidating the cached prefix.
+            #
+            # For other providers: append the counter as a plain string
+            # (original behaviour — no content-block support needed).
             tool_uses_so_far = sum(
                 1 for m in compressed_current if isinstance(m, ToolMessage)
             )
             remaining = MAX_AGENT_ITERATIONS - tool_uses_so_far
-            if tool_uses_so_far > 0 and compressed_current and isinstance(compressed_current[0], HumanMessage):
+            if compressed_current and isinstance(compressed_current[0], HumanMessage):
                 first = compressed_current[0]
-                counter = f"\n[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
-                if remaining <= 3:
-                    counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
                 old_content = first.content if isinstance(first.content, str) else ""
-                try:
-                    compressed_current[0] = first.model_copy(
-                        update={"content": old_content + counter}
-                    )
-                except Exception:
-                    new_first = copy(first)
-                    new_first.content = old_content + counter
-                    compressed_current[0] = new_first
+                if is_anthropic:
+                    # Original text — stable, gets cached from the very first call.
+                    content_blocks: list = [
+                        {
+                            "type": "text",
+                            "text": old_content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                    # Counter block — changes each iteration, stays outside cache.
+                    if tool_uses_so_far > 0:
+                        counter = f"[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
+                        if remaining <= 3:
+                            counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
+                        content_blocks.append({"type": "text", "text": counter})
+                    try:
+                        compressed_current[0] = first.model_copy(
+                            update={"content": content_blocks}
+                        )
+                    except Exception:
+                        new_first = copy(first)
+                        new_first.content = content_blocks
+                        compressed_current[0] = new_first
+                elif tool_uses_so_far > 0:
+                    counter = f"\n[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
+                    if remaining <= 3:
+                        counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
+                    try:
+                        compressed_current[0] = first.model_copy(
+                            update={"content": old_content + counter}
+                        )
+                    except Exception:
+                        new_first = copy(first)
+                        new_first.content = old_content + counter
+                        compressed_current[0] = new_first
 
             # ── 4. History cache breakpoint (Anthropic only) ──────────────
             # Mark the last summary message before the current turn with
