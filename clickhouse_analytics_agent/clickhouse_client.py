@@ -56,7 +56,7 @@ class ClickHouseClient:
             "database": CLICKHOUSE_DATABASE,
             "secure": True,
             "connect_timeout": 30,
-            "send_receive_timeout": 300,
+            "send_receive_timeout": 600,
         }
         if CLICKHOUSE_SSL_CERT:
             connect_kwargs["verify"] = True
