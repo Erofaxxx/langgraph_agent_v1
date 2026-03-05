@@ -92,7 +92,7 @@ class PythonSandbox:
                 continue
             # Try datetime conversion
             try:
-                dt_converted = pd.to_datetime(df[col], errors="coerce")
+                dt_converted = pd.to_datetime(df[col], errors="coerce", format="mixed")
                 if dt_converted.notna().sum() / len(non_null) > 0.8:
                     df[col] = dt_converted
             except Exception:
