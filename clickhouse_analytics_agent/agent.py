@@ -310,6 +310,18 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
 * Фильтруй в WHERE — не выгружай лишнее
 * LIMIT: обычно 1000–10000; до 500000 для больших выборок (таблицы могут содержать 800 000+ строк)
 * Функции: toStartOfMonth(), toYear(), toDayOfWeek(), arrayJoin() и т.д.
+* **Проверенные шаблоны фильтрации по датам** — используй именно этот синтаксис, он гарантированно работает:
+  ```sql
+  -- Прошлый месяц:
+  WHERE date >= toStartOfMonth(today() - INTERVAL 1 MONTH) AND date < toStartOfMonth(today())
+  -- Последние 30 дней:
+  WHERE date >= today() - INTERVAL 30 DAY
+  -- Текущий год:
+  WHERE toYear(date) = toYear(today())
+  -- Конкретный период:
+  WHERE date BETWEEN '2024-01-01' AND '2024-01-31'
+  ```
+  Не используй CTE только для фильтрации по дате — это всегда решается в WHERE напрямую.
 * Сохрани parquet_path из ответа для python_analysis
 * Если ответ содержит `"cached": true` — данные взяты из кэша, ClickHouse не был запрошен; итерация не потрачена
 * Если уже есть parquet_path из предыдущего clickhouse_query — передай его напрямую в python_analysis, не повторяй тот же запрос
@@ -327,6 +339,7 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
 * Начинай с одной витрины. JOIN — только если без него принципиально не решить
 * При JOIN двух витрин — одной строкой укажи по какому ключу соединяешь и что это означает для интерпретации.
 * При временной фильтрации — указывай в ответе по какому полю фильтруешь
+* Если используешь другую таблицу вместо той, что назвал пользователь — первой строкой ответа объясни почему (например: "dm_campaign_funnel не содержит недельной динамики, использую dm_traffic_performance")
 
 ### 4. Проанализировать данные в Python
 Вызови python_analysis для расчётов:
@@ -376,7 +389,14 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
    - Числа: `df['col'] = pd.to_numeric(df['col'], errors='coerce')`
    - Проверяй: `print(df_info)` — словарь {{колонка: тип}} для быстрой диагностики
    - col_stats в ответе clickhouse_query содержит реальные типы pandas — ориентируйся на них
+   - ЗАПРЕЩЕНО: вызывать python_analysis только для df.shape / dtypes / head() — col_stats уже содержит все эти данные. Каждый вызов python_analysis должен производить вычисления или строить таблицу для ответа.
 10. Перед делением — всегда проверяй знаменатель: `df[df['знаменатель'] > 0]` или `.replace(0, np.nan)`
+11. Строковые колонки с NULL/NaN — никогда не пиши `if row['field']` в `.apply()`: это сломается на NaN. Безопасный паттерн для создания меток:
+    ```python
+    df['label'] = df['utm_campaign'].apply(
+        lambda v: str(v) if pd.notna(v) and str(v).strip() else 'unknown'
+    )
+    ```
 
 ## Рекламные метрики
 Формулы не нужно воспроизводить в каждом ответе. Но:
@@ -795,7 +815,16 @@ class AnalyticsAgent:
         return plots
 
     def _extract_tool_calls(self, messages: list) -> list[dict]:
-        """Extract a compact log of tool calls made during the current run."""
+        """
+        Extract a compact log of tool calls made during the current run.
+
+        Each entry includes:
+          - tool: tool name
+          - input: args (SQL up to 2000 chars, other strings up to 500)
+          - success: bool from ToolMessage (if available)
+          - row_count / cached: for clickhouse_query
+          - error: for failed calls
+        """
         last_human_idx = -1
         for i, msg in enumerate(messages):
             if isinstance(msg, HumanMessage):
@@ -804,6 +833,14 @@ class AnalyticsAgent:
         if last_human_idx < 0:
             return []
 
+        # Build tool_call_id → ToolMessage map so we can attach outputs
+        tool_results: dict[str, ToolMessage] = {}
+        for msg in messages[last_human_idx:]:
+            if isinstance(msg, ToolMessage):
+                tc_id = getattr(msg, "tool_call_id", None)
+                if tc_id:
+                    tool_results[tc_id] = msg
+
         tool_calls: list[dict] = []
         for msg in messages[last_human_idx:]:
             if not isinstance(msg, AIMessage):
@@ -811,11 +848,36 @@ class AnalyticsAgent:
             for tc in getattr(msg, "tool_calls", []):
                 name = tc.get("name", "")
                 args = tc.get("args", {})
+                tc_id = tc.get("id", "")
+                # SQL gets 2000 chars; other strings get 500
                 compact_args = {
-                    k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v)
+                    k: (
+                        v[:2000] + "…" if k == "sql" and isinstance(v, str) and len(v) > 2000
+                        else v[:500] + "…" if isinstance(v, str) and len(v) > 500
+                        else v
+                    )
                     for k, v in args.items()
                 }
-                tool_calls.append({"tool": name, "input": compact_args})
+                entry: dict = {"tool": name, "input": compact_args}
+
+                # Attach output metadata from ToolMessage
+                tm = tool_results.get(tc_id)
+                if tm is not None:
+                    try:
+                        data = json.loads(tm.content)
+                        entry["success"] = data.get("success")
+                        if name == "clickhouse_query":
+                            entry["row_count"] = data.get("row_count")
+                            entry["cached"] = data.get("cached")
+                            if not data.get("success"):
+                                entry["error"] = data.get("error", "")
+                        elif name == "python_analysis":
+                            if not data.get("success"):
+                                entry["error"] = data.get("error", "")
+                    except Exception:
+                        entry["output_raw"] = str(tm.content)[:500]
+
+                tool_calls.append(entry)
 
         return tool_calls
 
