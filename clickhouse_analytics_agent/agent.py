@@ -86,10 +86,11 @@ def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
 
         elif tool_name == "clickhouse_query":
             data = json.loads(content)
-            # Drop preview_first_5_rows and dtypes — already analysed in this turn
+            # Drop col_stats — already used to write the Python code, not needed for final answer
             new_content = json.dumps(
                 {
                     "success": data.get("success"),
+                    "cached": data.get("cached"),
                     "row_count": data.get("row_count"),
                     "columns": data.get("columns"),
                     "parquet_path": data.get("parquet_path"),
@@ -240,19 +241,22 @@ def _build_schema_block(tables: list[dict]) -> str:
     Format a list of {table, columns} dicts into a compact schema section
     for embedding in the system prompt.
 
-    Example output:
+    If columns contain type info, it is included for accurate Python code generation:
+      **orders**: id UInt64, date Date, amount Decimal64(18,2), status String
+    Otherwise (legacy format, column names only):
       **orders**: id, user_id, date, amount, status
-      **sessions**: id, date, utm_source, utm_medium, revenue
     """
     lines = []
     for t in tables:
         cols = t.get("columns", [])
-        # columns may be a list of strings or list of dicts (legacy)
         if cols and isinstance(cols[0], dict):
-            col_names = [c["name"] for c in cols]
+            if "type" in cols[0]:
+                col_parts = [f"{c['name']} {c['type']}" for c in cols]
+            else:
+                col_parts = [c["name"] for c in cols]
         else:
-            col_names = [str(c) for c in cols]
-        lines.append(f"**{t['table']}**: {', '.join(col_names)}")
+            col_parts = [str(c) for c in cols]
+        lines.append(f"**{t['table']}**: {', '.join(col_parts)}")
     return "\n".join(lines)
 
 
@@ -307,6 +311,19 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
 * LIMIT: обычно 1000–10000; до 500000 для больших выборок (таблицы могут содержать 800 000+ строк)
 * Функции: toStartOfMonth(), toYear(), toDayOfWeek(), arrayJoin() и т.д.
 * Сохрани parquet_path из ответа для python_analysis
+* Если ответ содержит `"cached": true` — данные взяты из кэша, ClickHouse не был запрошен; итерация не потрачена
+* Если уже есть parquet_path из предыдущего clickhouse_query — передай его напрямую в python_analysis, не повторяй тот же запрос
+* КРИТИЧНО: объединяй данные из нескольких таблиц в ОДНОМ запросе через WITH/CTE — не делай несколько отдельных запросов туда и обратно:
+  ```sql
+  WITH кампании AS (
+      SELECT campaign_id, SUM(spend) AS spend FROM dm_campaigns WHERE date >= '2024-01-01' GROUP BY campaign_id
+  ),
+  сессии AS (
+      SELECT campaign_id, COUNT() AS visits, SUM(revenue) AS revenue FROM dm_traffic GROUP BY campaign_id
+  )
+  SELECT к.campaign_id, к.spend, с.visits, с.revenue, с.revenue / к.spend AS roas
+  FROM кампании к LEFT JOIN сессии с USING (campaign_id)
+  ```
 * Начинай с одной витрины. JOIN — только если без него принципиально не решить
 * При JOIN двух витрин — одной строкой укажи по какому ключу соединяешь и что это означает для интерпретации.
 * При временной фильтрации — указывай в ответе по какому полю фильтруешь
@@ -354,6 +371,12 @@ _SYSTEM_PROMPT_TEMPLATE = """Ты — лучший в мире аналитик 
 6. Обрабатывай пропуски: df.dropna() или df.fillna(0)
 7. Для каждого графика — plt.tight_layout() перед следующим
 8. График строй ТОЛЬКО если он явно нужен по типу вопроса (см. шаг 4) — не по умолчанию
+9. Типы данных — sandbox автоматически конвертирует object-столбцы, но если тип неожиданный:
+   - Даты: `df['col'] = pd.to_datetime(df['col'], errors='coerce')` → затем `.dt.year`, `.dt.month`
+   - Числа: `df['col'] = pd.to_numeric(df['col'], errors='coerce')`
+   - Проверяй: `print(df_info)` — словарь {{колонка: тип}} для быстрой диагностики
+   - col_stats в ответе clickhouse_query содержит реальные типы pandas — ориентируйся на них
+10. Перед делением — всегда проверяй знаменатель: `df[df['знаменатель'] > 0]` или `.replace(0, np.nan)`
 
 ## Рекламные метрики
 Формулы не нужно воспроизводить в каждом ответе. Но:
@@ -527,6 +550,29 @@ class AnalyticsAgent:
                     compressed_current.append(_compress_tool_message(msg))
                 else:
                     compressed_current.append(msg)
+
+            # ── 3b. Iteration counter — appended to current HumanMessage ──
+            # The counter tells the LLM how many tool calls remain so it can
+            # decide whether to make another query or finalize the answer.
+            # We modify only the local copy — the checkpoint is never touched.
+            tool_uses_so_far = sum(
+                1 for m in compressed_current if isinstance(m, ToolMessage)
+            )
+            remaining = MAX_AGENT_ITERATIONS - tool_uses_so_far
+            if tool_uses_so_far > 0 and compressed_current and isinstance(compressed_current[0], HumanMessage):
+                first = compressed_current[0]
+                counter = f"\n[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
+                if remaining <= 3:
+                    counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
+                old_content = first.content if isinstance(first.content, str) else ""
+                try:
+                    compressed_current[0] = first.model_copy(
+                        update={"content": old_content + counter}
+                    )
+                except Exception:
+                    new_first = copy(first)
+                    new_first.content = old_content + counter
+                    compressed_current[0] = new_first
 
             # ── 4. History cache breakpoint (Anthropic only) ──────────────
             # Mark the last summary message before the current turn with

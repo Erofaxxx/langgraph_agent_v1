@@ -40,14 +40,12 @@ def list_tables() -> str:
     """
     Get the list of ALL tables in the ClickHouse database with their column names.
 
-    NOTE: The schema is already embedded in your system prompt — do NOT call this
-    at the start of a session. Use it only if a table seems missing or the embedded
-    schema appears incomplete.
-
-    If you need exact column types, run: SELECT name, type FROM system.columns WHERE table='...' LIMIT 100
+    NOTE: The schema (with column types) is already embedded in your system prompt —
+    do NOT call this at the start of a session. Use it only if a table seems missing
+    or the embedded schema appears incomplete.
 
     Returns: JSON array of objects like:
-      [{"table": "visits", "columns": ["date", "session_id", "revenue", ...]}, ...]
+      [{"table": "visits", "columns": [{"name": "date", "type": "Date"}, ...]}, ...]
     """
     try:
         tables = _get_ch_client().list_tables()
@@ -62,8 +60,14 @@ def clickhouse_query(sql: str) -> str:
     """
     Execute a SELECT query against ClickHouse.
 
-    Returns JSON: row_count, columns, dtypes, preview_first_5_rows, parquet_path.
-    Pass parquet_path to python_analysis. SELECT only; always include LIMIT.
+    Returns JSON with fields:
+      - row_count: total rows returned
+      - columns: list of column names
+      - col_stats: per-column stats (type, min/max for numeric/datetime; unique+sample for strings)
+      - parquet_path: path to saved Parquet file — pass this to python_analysis
+      - cached: true if result was served from cache without hitting ClickHouse
+
+    Rules: SELECT only; always include LIMIT; use WITH/CTE to join multiple tables in one query.
 
     Args:
         sql: ClickHouse SELECT statement.

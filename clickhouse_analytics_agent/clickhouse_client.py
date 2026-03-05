@@ -6,6 +6,7 @@ Executes SELECT queries and saves results to Parquet.
 import hashlib
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import clickhouse_connect
@@ -20,6 +21,7 @@ from config import (
     CLICKHOUSE_SSL_CERT,
     CLICKHOUSE_USER,
     TEMP_DIR,
+    TEMP_FILE_TTL_SECONDS,
 )
 
 
@@ -70,34 +72,71 @@ class ClickHouseClient:
 
     def list_tables(self) -> list[dict]:
         """
-        Return all tables in the current database with column names only (no types).
-        Result: [{"table": "visits", "columns": ["id", "date", ...]}, ...]
-
-        Types are omitted to reduce token usage (~64% smaller response).
-        The model can infer types from column names or run a LIMIT 0 query if needed.
+        Return all tables in the current database with column names and types.
+        Result: [{"table": "visits", "columns": [{"name": "date", "type": "Date"}, ...]}, ...]
         """
         result = self.client.query(
-            "SELECT table, name "
+            "SELECT table, name, type "
             "FROM system.columns "
             "WHERE database = currentDatabase() "
             "ORDER BY table, position"
         )
         tables: dict[str, list] = {}
         for row in result.result_rows:
-            table_name, col_name = row[0], row[1]
+            table_name, col_name, col_type = row[0], row[1], row[2]
             if table_name not in tables:
                 tables[table_name] = []
-            tables[table_name].append(col_name)
+            tables[table_name].append({"name": col_name, "type": col_type})
         return [{"table": t, "columns": cols} for t, cols in tables.items()]
+
+    @staticmethod
+    def _build_col_stats(df: pd.DataFrame) -> dict:
+        """
+        Build a compact per-column statistics dict instead of returning raw preview rows.
+
+        For numeric columns: {type, min, max, nulls}
+        For datetime columns: {type, min, max, nulls}
+        For other (string/categorical): {type, unique, sample: [top-3], nulls}
+
+        This is smaller in tokens than 5 preview rows and more useful for writing Python.
+        """
+        stats: dict = {}
+        for col in df.columns:
+            series = df[col]
+            non_null = series.dropna()
+            null_count = int(series.isna().sum())
+
+            if pd.api.types.is_numeric_dtype(series):
+                stats[col] = {
+                    "type": str(series.dtype),
+                    "min": _safe_json_value(non_null.min()) if len(non_null) else None,
+                    "max": _safe_json_value(non_null.max()) if len(non_null) else None,
+                    "nulls": null_count,
+                }
+            elif pd.api.types.is_datetime64_any_dtype(series):
+                stats[col] = {
+                    "type": str(series.dtype),
+                    "min": str(non_null.min()) if len(non_null) else None,
+                    "max": str(non_null.max()) if len(non_null) else None,
+                    "nulls": null_count,
+                }
+            else:
+                sample = [str(v) for v in non_null.value_counts().head(3).index.tolist()]
+                stats[col] = {
+                    "type": str(series.dtype),
+                    "unique": int(non_null.nunique()),
+                    "sample": sample,
+                    "nulls": null_count,
+                }
+        return stats
 
     def execute_query(self, sql: str, limit: int = 500000) -> dict:
         """
         Execute a SELECT query.
         1. Validates it starts with SELECT.
         2. Appends LIMIT if missing.
-        3. Runs query, builds DataFrame.
-        4. Saves DataFrame to Parquet in TEMP_DIR.
-        5. Returns metadata + first 5 rows preview + parquet_path.
+        3. Checks Parquet cache (keyed by MD5 of SQL) — returns cached result if fresh.
+        4. If not cached: runs query, saves to Parquet, returns metadata + col_stats.
         """
         sql_stripped = sql.strip()
 
@@ -112,28 +151,46 @@ class ClickHouseClient:
         if "LIMIT" not in sql_stripped.upper():
             sql_stripped = f"{sql_stripped.rstrip().rstrip(';')} LIMIT {limit}"
 
+        # Parquet cache: keyed by SQL hash (no timestamp) so retries reuse the file
+        query_hash = hashlib.md5(sql_stripped.encode()).hexdigest()[:10]
+        parquet_path = str(TEMP_DIR / f"query_{query_hash}.parquet")
+        p = Path(parquet_path)
+
+        # ── Cache hit ───────────────────────────────────────────────────────
+        if p.exists():
+            age = time.time() - p.stat().st_mtime
+            if age < TEMP_FILE_TTL_SECONDS:
+                try:
+                    df = pd.read_parquet(parquet_path)
+                    return {
+                        "success": True,
+                        "cached": True,
+                        "row_count": len(df),
+                        "columns": list(df.columns),
+                        "col_stats": self._build_col_stats(df),
+                        "parquet_path": parquet_path,
+                    }
+                except Exception:
+                    # Corrupted cache file — fall through to re-query
+                    p.unlink(missing_ok=True)
+            else:
+                # Expired — delete and re-query
+                p.unlink(missing_ok=True)
+
+        # ── Cache miss: query ClickHouse ─────────────────────────────────────
         try:
             result = self.client.query(sql_stripped)
             df = pd.DataFrame(result.result_rows, columns=result.column_names)
 
             # Save to Parquet (preserves complex types like Array, Map, Decimal)
-            query_hash = hashlib.md5(sql_stripped.encode()).hexdigest()[:10]
-            parquet_filename = f"query_{query_hash}_{int(time.time())}.parquet"
-            parquet_path = str(TEMP_DIR / parquet_filename)
             df.to_parquet(parquet_path, engine="pyarrow", index=False)
-
-            # Build JSON-safe preview of first 5 rows
-            preview = df.head(5).to_dict(orient="records")
-            for row in preview:
-                for k, v in row.items():
-                    row[k] = _safe_json_value(v)
 
             return {
                 "success": True,
+                "cached": False,
                 "row_count": len(df),
                 "columns": list(df.columns),
-                "dtypes": {col: str(df[col].dtype) for col in df.columns},
-                "preview_first_5_rows": preview,
+                "col_stats": self._build_col_stats(df),
                 "parquet_path": parquet_path,
             }
 
