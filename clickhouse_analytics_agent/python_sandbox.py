@@ -78,6 +78,26 @@ class PythonSandbox:
                 "error": f"Failed to load parquet file '{parquet_path}': {exc}",
             }
 
+        # ── Auto-coerce object columns to numeric or datetime ───────────────
+        # ClickHouse can return Date/DateTime as strings or Decimal as objects.
+        # This prevents common TypeErrors in agent-written Python code.
+        for col in list(df.select_dtypes(include="object").columns):
+            non_null = df[col].dropna()
+            if len(non_null) == 0:
+                continue
+            # Try numeric conversion first
+            converted = pd.to_numeric(df[col], errors="coerce")
+            if converted.notna().sum() / len(non_null) > 0.8:
+                df[col] = converted
+                continue
+            # Try datetime conversion
+            try:
+                dt_converted = pd.to_datetime(df[col], errors="coerce")
+                if dt_converted.notna().sum() / len(non_null) > 0.8:
+                    df[col] = dt_converted
+            except Exception:
+                pass
+
         # Close any stray figures from previous runs
         plt.close("all")
 
@@ -89,6 +109,8 @@ class PythonSandbox:
             "plt": plt,
             "sns": sns,
             "result": None,  # agent sets this for final text output
+            # Compact type map for quick debugging: {"col": "int64", ...}
+            "df_info": {col: str(dtype) for col, dtype in df.dtypes.items()},
         }
 
         stdout_capture = io.StringIO()
