@@ -16,6 +16,7 @@ Architecture change: async job queue.
   - Client reconnecting after disconnect can still fetch the result.
 """
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Literal
@@ -108,6 +109,7 @@ async def _run_agent_job(job_id: str) -> None:
     if not job:
         return
     _set_running(job_id)
+    started_at = datetime.now(timezone.utc).isoformat()
     try:
         from agent import get_agent
         agent = get_agent()
@@ -117,6 +119,24 @@ async def _run_agent_job(job_id: str) -> None:
             session_id=job["session_id"],
         )
         _set_done(job_id, result)
+
+        # ── Passive observability logging ──────────────────────────────────
+        # Agent is already done and result is stored. Logger runs in a
+        # daemon thread — any failure is silently swallowed, never affects agent.
+        try:
+            msgs = result.get("_messages", [])
+            if msgs:
+                import threading as _threading
+                from chat_logger import get_logger
+                from config import DB_PATH
+                _threading.Thread(
+                    target=get_logger(DB_PATH).log_turn,
+                    args=(job["session_id"], msgs, started_at),
+                    daemon=True,
+                ).start()
+        except Exception as log_exc:
+            print(f"[ChatLogger] init error (non-fatal): {log_exc}")
+
     except Exception as exc:
         _set_error(job_id, str(exc))
         print(f"[job:{job_id}] ERROR: {exc}")
@@ -241,6 +261,117 @@ async def chat_stats():
     for j in _jobs.values():
         by_status[j["status"]] = by_status.get(j["status"], 0) + 1
     return {"total_jobs_in_memory": total, "by_status": by_status}
+# ─── Observability / Debug endpoints ─────────────────────────────────────────
+# These endpoints are for developer use only (agent optimization analysis).
+# They are NOT intended for the end-user frontend.
+
+@app.get("/debug/sessions", tags=["debug"], summary="List all logged sessions")
+async def debug_sessions():
+    """
+    List all sessions with aggregated stats:
+    turns, total tool calls, estimated token usage, first/last activity.
+    """
+    try:
+        from chat_logger import get_logger
+        from config import DB_PATH
+        return {"sessions": get_logger(DB_PATH).get_sessions()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/session/{session_id}", tags=["debug"], summary="Full session log with tool calls")
+async def debug_session_logs(session_id: str):
+    """
+    Full chronological log of a session grouped by turn.
+
+    Each turn contains events in order:
+      human       → user question
+      ai_thinking → agent reasoning before tool use (if any)
+      tool_call   → tool invocation with full args (SQL, Python code, etc.)
+      tool_result → full tool response (row_count, data stats, analysis output)
+      ai_answer   → final agent response shown to user
+
+    Useful for: reviewing what SQL the agent wrote, how many iterations it took,
+    whether it used the right tables, whether tool results were large/expensive.
+    """
+    try:
+        from chat_logger import get_logger
+        from config import DB_PATH
+        logs = get_logger(DB_PATH).get_session_logs(session_id)
+        if not logs:
+            raise HTTPException(status_code=404, detail="Session not found or not yet logged")
+
+        # Group by turn_index, parse JSON content for readability
+        turns: dict[int, list] = {}
+        for row in logs:
+            if row.get("content"):
+                try:
+                    row["content"] = json.loads(row["content"])
+                except Exception:
+                    pass  # leave as plain string if not JSON
+            turns.setdefault(row["turn_index"], []).append(row)
+
+        return {
+            "session_id": session_id,
+            "total_turns": len(turns),
+            "turns": [
+                {"turn_index": idx, "events": events}
+                for idx, events in sorted(turns.items())
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/session/{session_id}/turn/{turn_index}", tags=["debug"], summary="Log for one specific turn")
+async def debug_turn_logs(session_id: str, turn_index: int):
+    """
+    Detailed event log for a single turn within a session.
+    Useful for deep-diving into one specific question the user asked.
+    """
+    try:
+        from chat_logger import get_logger
+        from config import DB_PATH
+        events = get_logger(DB_PATH).get_turn(session_id, turn_index)
+        if not events:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Turn {turn_index} not found for session {session_id}"
+            )
+        # Parse JSON content fields
+        for ev in events:
+            if ev.get("content"):
+                try:
+                    ev["content"] = json.loads(ev["content"])
+                except Exception:
+                    pass
+        return {"session_id": session_id, "turn_index": turn_index, "events": events}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/stats", tags=["debug"], summary="Aggregate optimization stats")
+async def debug_stats():
+    """
+    Aggregate statistics across all logged sessions.
+
+    Key metrics for optimization analysis:
+      - list_tables_calls: should be ~0 (schema is in system prompt)
+      - avg_ch_result_tokens: if high → agent fetching too much data
+      - tool_calls_total / human_turns: avg tool calls per user question
+    """
+    try:
+        from chat_logger import get_logger
+        from config import DB_PATH
+        return get_logger(DB_PATH).get_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("api_server:app", host=HOST, port=PORT, log_level="info")

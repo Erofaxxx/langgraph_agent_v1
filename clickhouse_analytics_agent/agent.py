@@ -771,6 +771,7 @@ class AnalyticsAgent:
                 "plots": plots,
                 "tool_calls": tool_calls,
                 "error": None,
+                "_messages": messages,  # for passive observability logger only
             }
 
         except Exception as exc:
