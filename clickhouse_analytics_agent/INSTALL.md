@@ -84,13 +84,14 @@ nano .env
 # Ваш ключ OpenRouter (https://openrouter.ai/keys)
 OPENROUTER_API_KEY=sk-or-v1-XXXXXXXXXXXXXXXX
 
-# ClickHouse — Яндекс Cloud
-CLICKHOUSE_HOST=your-cluster.mdb.yandexcloud.net
+# ClickHouse (self-hosted, Let's Encrypt SSL)
+CLICKHOUSE_HOST=clickhouse.asktab.ru
 CLICKHOUSE_PORT=8443
-CLICKHOUSE_USER=your_user
+CLICKHOUSE_USER=User_sanok
 CLICKHOUSE_PASSWORD=your_password
-CLICKHOUSE_DATABASE=your_database
-CLICKHOUSE_SSL_CERT_PATH=YandexInternalRootCA.crt
+CLICKHOUSE_DATABASE=ym_sanok
+# Оставьте пустым при использовании Let's Encrypt (доверенный CA)
+CLICKHOUSE_SSL_CERT_PATH=
 
 # URL вашего сервера
 SERVER_URL=https://server.asktab.ru
