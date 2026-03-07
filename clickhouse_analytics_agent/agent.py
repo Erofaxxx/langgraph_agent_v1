@@ -465,12 +465,10 @@ def _create_llm():
         default_headers=_OPENROUTER_HEADERS,
     )
     if MODEL_PROVIDER == "anthropic":
-        kwargs["model_kwargs"] = {
-            "extra_body": {
-                "provider": {
-                    "order": ["Anthropic"],
-                    "allow_fallbacks": False,
-                },
+        kwargs["extra_body"] = {
+            "provider": {
+                "order": ["Anthropic"],
+                "allow_fallbacks": False,
             },
         }
     return ChatOpenAI(**kwargs)
