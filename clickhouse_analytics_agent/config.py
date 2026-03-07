@@ -38,7 +38,8 @@ CLICKHOUSE_USER: str = os.environ.get("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASSWORD: str = os.environ.get("CLICKHOUSE_PASSWORD", "")
 CLICKHOUSE_DATABASE: str = os.environ.get("CLICKHOUSE_DATABASE", "default")
 
-# SSL certificate for Yandex Cloud ClickHouse
+# Custom CA certificate (for self-signed or private CA).
+# Leave CLICKHOUSE_SSL_CERT_PATH empty when using a trusted CA (e.g. Let's Encrypt).
 CLICKHOUSE_SSL_CERT: str = ""
 _ssl_path = os.environ.get("CLICKHOUSE_SSL_CERT_PATH", "")
 if _ssl_path:
