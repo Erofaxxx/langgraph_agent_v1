@@ -27,6 +27,10 @@ MODEL: str = os.environ.get("MODEL", _PROVIDER_DEFAULT_MODELS.get(MODEL_PROVIDER
 
 MAX_TOKENS: int = int(os.environ.get("MAX_TOKENS", "8192"))
 
+# Router: дешёвая модель для классификации запросов (~$0.0001 за вызов)
+# Определяет, какие skills нужны для текущего запроса
+ROUTER_MODEL: str = os.environ.get("ROUTER_MODEL", "anthropic/claude-haiku-4.5")
+
 # ─── ClickHouse ──────────────────────────────────────────────────────────────
 CLICKHOUSE_HOST: str = (
     os.environ.get("CLICKHOUSE_HOST", "")
