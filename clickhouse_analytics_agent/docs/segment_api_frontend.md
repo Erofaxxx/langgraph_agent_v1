@@ -221,3 +221,241 @@ async function deleteSegment(segmentId: string) {
   refreshSegmentList();
 }
 ```
+
+---
+
+## 4. Использование сегмента в основном агенте
+
+### Как работает основной агент
+
+Основной аналитический агент — это **отдельный сервис** (`POST /api/analyze`), асинхронный:
+
+```
+POST /api/analyze           ← отправить запрос
+  → { job_id, session_id }
+
+GET  /api/job/{job_id}      ← polling до status: "done"
+  → { status, text_output, plots, tool_calls, error }
+```
+
+> **Важно:** заголовок `X-User-Id` для основного агента **не нужен** — у него нет изоляции по пользователям. Передаётся только в segment API.
+
+---
+
+### Как передать сегмент в контекст
+
+У основного агента **нет отдельного параметра** для сегмента — контекст передаётся **только через поле `query`**.
+
+Когда пользователь выбирает сегмент, фронтенд **встраивает** его данные в начало запроса:
+
+```
+[Сегмент: "Тёплые лиды Direct"
+sql_query: SELECT DISTINCT client_id FROM dm_client_profile WHERE first_utm_source = 'ya-direct' AND total_visits >= 2 AND has_purchased = 0 AND days_since_last_visit <= 30]
+
+Покажи распределение по каналам для этого сегмента
+```
+
+Агент увидит SQL, активирует skill `segmentation` и сразу построит CTE — **не будет просить пользователя вставить SQL вручную**.
+
+---
+
+### UI-паттерн: тег `@mention`
+
+**Пользователь видит** красивый тег в поле ввода:
+
+```
+[@Тёплые лиды Direct ×]  Покажи распределение по каналам
+```
+
+**Агент получает** query с встроенным SQL:
+
+```
+[Сегмент: "Тёплые лиды Direct"
+sql_query: SELECT DISTINCT client_id ...]
+
+Покажи распределение по каналам
+```
+
+**Триггеры для открытия выпадающего списка:**
+- Кнопка `+` рядом с полем ввода
+- Символ `@` в тексте → автодополнение по имени сегмента
+
+---
+
+### TypeScript: полный пример
+
+```typescript
+// ── Типы ────────────────────────────────────────────────────────────
+
+interface SegmentMention {
+  id: string;
+  name: string;
+  sql_query: string;
+}
+
+interface MainAgentRequest {
+  query: string;
+  session_id?: string;
+}
+
+interface JobStatusResponse {
+  job_id: string;
+  session_id: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  text_output?: string;
+  plots?: string[];
+  error?: string;
+}
+
+// ── Сборка query с инъекцией сегментов ──────────────────────────────
+
+function buildQueryWithSegments(
+  userText: string,
+  mentions: SegmentMention[],
+): string {
+  if (mentions.length === 0) return userText;
+
+  const blocks = mentions.map(
+    (s) => `[Сегмент: "${s.name}"\nsql_query: ${s.sql_query}]`,
+  );
+  return `${blocks.join('\n')}\n\n${userText}`;
+}
+
+// ── Отправка в основной агент + polling ──────────────────────────────
+
+async function sendToMainAgent(
+  userText: string,
+  mentions: SegmentMention[],
+  sessionId: string | null,
+): Promise<{ text_output: string; session_id: string }> {
+  const query = buildQueryWithSegments(userText, mentions);
+
+  // 1. Отправить запрос
+  const submitRes = await fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, session_id: sessionId } satisfies MainAgentRequest),
+  });
+  const { job_id, session_id: newSessionId } = await submitRes.json();
+
+  // 2. Polling до завершения
+  while (true) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const pollRes = await fetch(`/api/job/${job_id}`);
+    const job: JobStatusResponse = await pollRes.json();
+
+    if (job.status === 'done') {
+      return { text_output: job.text_output ?? '', session_id: newSessionId };
+    }
+    if (job.status === 'error') {
+      throw new Error(job.error ?? 'Agent error');
+    }
+    // 'pending' | 'running' → продолжить polling
+  }
+}
+
+// ── React: поле ввода с @-триггером ─────────────────────────────────
+
+function ChatInput({ onSend }: { onSend: (text: string, mentions: SegmentMention[]) => void }) {
+  const [text, setText] = useState('');
+  const [mentions, setMentions] = useState<SegmentMention[]>([]);
+  const [suggestions, setSuggestions] = useState<SegmentMention[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  const userId = getCurrentUser().email;
+  const authHeaders = { 'X-User-Id': userId };
+
+  // Открыть список сегментов по @ или кнопке +
+  async function openSegmentPicker() {
+    const res = await fetch('/api/segments', { headers: authHeaders });
+    const { segments } = await res.json();
+    setSuggestions(segments);
+    setShowDropdown(true);
+  }
+
+  function handleTextChange(value: string) {
+    setText(value);
+    // Триггер по @ в конце слова
+    if (value.endsWith('@') || value.match(/@\w*$/)) {
+      openSegmentPicker();
+    }
+  }
+
+  function selectSegment(segment: SegmentMention) {
+    setMentions((prev) => [...prev, segment]);
+    // Убрать @ из текста, заменить тегом (визуально)
+    setText((prev) => prev.replace(/@\w*$/, ''));
+    setShowDropdown(false);
+  }
+
+  function removeMention(id: string) {
+    setMentions((prev) => prev.filter((m) => m.id !== id));
+  }
+
+  function handleSubmit() {
+    if (!text.trim() && mentions.length === 0) return;
+    onSend(text.trim(), mentions);
+    setText('');
+    setMentions([]);
+  }
+
+  return (
+    <div className="chat-input">
+      {/* Теги выбранных сегментов */}
+      {mentions.map((m) => (
+        <span key={m.id} className="segment-tag">
+          @{m.name}
+          <button onClick={() => removeMention(m.id)}>×</button>
+        </span>
+      ))}
+
+      <textarea
+        value={text}
+        onChange={(e) => handleTextChange(e.target.value)}
+        placeholder="Задай вопрос... или введите @ для выбора сегмента"
+        onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
+      />
+
+      {/* Кнопка + */}
+      <button onClick={openSegmentPicker} title="Выбрать сегмент">+</button>
+      <button onClick={handleSubmit}>Отправить</button>
+
+      {/* Выпадающий список сегментов */}
+      {showDropdown && (
+        <ul className="segment-dropdown">
+          {suggestions.map((s) => (
+            <li key={s.id} onClick={() => selectSegment(s)}>
+              <strong>{s.name}</strong>
+              <span>~{s.last_count?.toLocaleString()} пользователей</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+### Итоговый flow
+
+```
+Пользователь нажимает + или @
+        ↓
+GET /api/segments  (X-User-Id)
+        ↓
+Выбирает "Тёплые лиды Direct"
+        ↓
+В поле ввода появляется тег [@Тёплые лиды Direct ×]
+        ↓
+Пользователь добавляет текст и нажимает Отправить
+        ↓
+buildQueryWithSegments() → query с встроенным SQL сегмента
+        ↓
+POST /api/analyze  { query, session_id }   ← БЕЗ X-User-Id
+        ↓
+polling GET /api/job/{job_id}
+        ↓
+Отображение text_output пользователю
+```
