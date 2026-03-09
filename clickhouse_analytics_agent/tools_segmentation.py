@@ -3,13 +3,21 @@ Segmentation tool: save_segment.
 
 Вызывается агентом-сегментатором только после явного подтверждения маркетологом.
 Сохраняет JSON-определение сегмента в SQLite через SegmentStore.
+
+Изоляция owner: значение owner берётся из ContextVar _current_owner, который
+устанавливается в segment_agent.py перед вызовом graph.invoke() — LLM не может
+влиять на owner через аргументы инструмента.
 """
 
 import json
+from contextvars import ContextVar
 
 from langchain_core.tools import tool
 
-from segment_store import get_segment_store
+from segment_store import _SHARED_OWNER, get_segment_store
+
+# Устанавливается из SegmentBuilderAgent.chat() перед каждым graph.invoke()
+_current_owner: ContextVar[str] = ContextVar("_current_owner", default=_SHARED_OWNER)
 
 
 @tool
@@ -48,9 +56,10 @@ def save_segment(segment_json: str) -> str:
             "error": "Field 'sql_query' is required — run a trial COUNT query first to verify the segment",
         })
 
+    owner = _current_owner.get()
     try:
         store = get_segment_store()
-        saved = store.save(segment)
+        saved = store.save(segment, owner=owner)
         return json.dumps(
             {
                 "success": True,

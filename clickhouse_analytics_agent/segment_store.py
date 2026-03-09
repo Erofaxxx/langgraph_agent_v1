@@ -1,8 +1,9 @@
 """
 SegmentStore — thread-safe SQLite CRUD для именованных сегментов аудитории.
 
-Сегменты хранятся в той же chat_history.db (отдельная таблица `segments`).
-JSON-схема каждого сегмента соответствует segmentation_skill_spec.md §3–§5.
+Изоляция по пользователям: каждый сегмент принадлежит owner (значение X-User-Id).
+Пользователь видит и может удалять только свои сегменты.
+Если X-User-Id не передан — используется owner="__shared__" (обратная совместимость).
 
 При переходе на RAG — только этот модуль меняется, агент не трогается.
 """
@@ -16,9 +17,11 @@ from typing import Optional
 
 from config import DB_PATH
 
+_SHARED_OWNER = "__shared__"
+
 
 class SegmentStore:
-    """Thread-safe CRUD для сегментов аудитории."""
+    """Thread-safe CRUD для сегментов аудитории с изоляцией по owner."""
 
     def __init__(self, db_path: str = DB_PATH) -> None:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -29,10 +32,11 @@ class SegmentStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            # Создать таблицу если не существует
             self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS segments (
                     segment_id      TEXT PRIMARY KEY,
-                    name            TEXT NOT NULL UNIQUE,
+                    name            TEXT NOT NULL,
                     description     TEXT,
                     approach        TEXT,
                     period_json     TEXT,
@@ -46,11 +50,27 @@ class SegmentStore:
                     created_at      TEXT NOT NULL,
                     updated_at      TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_segments_name ON segments(name);
+            """)
+            # Добавить колонку owner если её нет (миграция существующих данных)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE segments ADD COLUMN owner TEXT NOT NULL DEFAULT '__shared__'"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # колонка уже существует
+
+            # Пересоздать уникальный индекс: (name, owner) вместо просто name
+            self._conn.executescript("""
+                DROP INDEX IF EXISTS idx_segments_name;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_segments_name_owner
+                    ON segments(name, owner);
+                CREATE INDEX IF NOT EXISTS idx_segments_owner
+                    ON segments(owner);
             """)
             self._conn.commit()
 
-    def save(self, segment: dict) -> dict:
+    def save(self, segment: dict, owner: str = _SHARED_OWNER) -> dict:
         """Сохранить или обновить сегмент. Возвращает сохранённый объект."""
         now = datetime.now(timezone.utc).date().isoformat()
         seg_id = segment.get("segment_id") or f"seg_{uuid.uuid4().hex[:8]}"
@@ -62,8 +82,8 @@ class SegmentStore:
                     segment_id, name, description, approach,
                     period_json, conditions_json, primary_table,
                     join_tables_json, sql_query, last_count,
-                    last_materialized, used_in_json, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    last_materialized, used_in_json, owner, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(segment_id) DO UPDATE SET
                     name             = excluded.name,
                     description      = excluded.description,
@@ -91,6 +111,7 @@ class SegmentStore:
                     segment.get("last_count"),
                     segment.get("last_materialized", now),
                     json.dumps(segment.get("used_in", []), ensure_ascii=False),
+                    owner,
                     segment.get("created_at", now),
                     now,
                 ),
@@ -98,37 +119,45 @@ class SegmentStore:
             self._conn.commit()
 
         segment["segment_id"] = seg_id
+        segment["owner"] = owner
         segment["updated_at"] = now
         if "created_at" not in segment:
             segment["created_at"] = now
         return segment
 
-    def get_by_name(self, name: str) -> Optional[dict]:
-        """Найти сегмент по имени (регистронезависимо)."""
+    def get_by_name(self, name: str, owner: str = _SHARED_OWNER) -> Optional[dict]:
+        """Найти сегмент по имени в пределах owner (регистронезависимо)."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM segments WHERE lower(name) = lower(?)", (name,)
+                "SELECT * FROM segments WHERE lower(name) = lower(?) AND owner = ?",
+                (name, owner),
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
-    def get_by_id(self, segment_id: str) -> Optional[dict]:
+    def get_by_id(self, segment_id: str, owner: str = _SHARED_OWNER) -> Optional[dict]:
+        """Вернуть сегмент только если он принадлежит owner."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM segments WHERE segment_id = ?", (segment_id,)
+                "SELECT * FROM segments WHERE segment_id = ? AND owner = ?",
+                (segment_id, owner),
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
-    def list_all(self) -> list[dict]:
+    def list_all(self, owner: str = _SHARED_OWNER) -> list[dict]:
+        """Список сегментов owner, отсортированный по дате обновления."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM segments ORDER BY updated_at DESC"
+                "SELECT * FROM segments WHERE owner = ? ORDER BY updated_at DESC",
+                (owner,),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def delete(self, segment_id: str) -> bool:
+    def delete(self, segment_id: str, owner: str = _SHARED_OWNER) -> bool:
+        """Удалить сегмент. Возвращает False если сегмент не найден или не принадлежит owner."""
         with self._lock:
             cur = self._conn.execute(
-                "DELETE FROM segments WHERE segment_id = ?", (segment_id,)
+                "DELETE FROM segments WHERE segment_id = ? AND owner = ?",
+                (segment_id, owner),
             )
             self._conn.commit()
         return cur.rowcount > 0
@@ -146,7 +175,7 @@ class SegmentStore:
             try:
                 d[col_name] = json.loads(raw or "{}")
             except Exception:
-                d[col_name] = {} if col_name != "join_tables" and col_name != "used_in" else []
+                d[col_name] = {} if col_name not in ("join_tables", "used_in") else []
         return d
 
 

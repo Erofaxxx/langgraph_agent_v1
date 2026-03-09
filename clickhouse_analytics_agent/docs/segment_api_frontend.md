@@ -2,6 +2,18 @@
 
 Base URL: `https://your-server/api`
 
+## Изоляция по пользователям
+
+Все запросы к segment API принимают заголовок **`X-User-Id`** (строка — любой уникальный идентификатор пользователя из вашей auth-системы: email, user_id, UUID).
+
+- Каждый пользователь видит **только свои** сегменты
+- Удалить можно только свой сегмент (чужой вернёт 404)
+- Без заголовка — сегменты попадают в общее пространство `__shared__`
+
+```
+X-User-Id: user@example.com
+```
+
 ---
 
 ## 1. Чат с агентом-сегментатором
@@ -9,6 +21,12 @@ Base URL: `https://your-server/api`
 ### `POST /api/segment/chat`
 
 Один ход диалога. Сохраняй `session_id` между вызовами.
+
+**Headers**
+```
+Content-Type: application/json
+X-User-Id: user@example.com
+```
 
 **Request**
 ```json
@@ -54,6 +72,7 @@ Base URL: `https://your-server/api`
 ### `GET /api/segment/chat/{session_id}/history`
 
 История диалога сессии (для восстановления чата после перезагрузки страницы).
+Заголовок `X-User-Id` не требуется — история хранится по session_id.
 
 **Response**
 ```json
@@ -71,9 +90,13 @@ Base URL: `https://your-server/api`
 
 ## 2. Управление сохранёнными сегментами
 
+Все endpoints требуют заголовок `X-User-Id`.
+
 ### `GET /api/segments`
 
-Список всех сегментов (сортировка по дате обновления — новые первыми).
+Список сегментов текущего пользователя (сортировка по дате обновления — новые первыми).
+
+**Headers:** `X-User-Id: user@example.com`
 
 **Response**
 ```json
@@ -84,6 +107,7 @@ Base URL: `https://your-server/api`
       "name": "Тёплые лиды Direct",
       "description": "Пользователи из ya-direct, 2+ визита, без покупок, 30 дней",
       "approach": "funnel_behavioral",
+      "owner": "user@example.com",
       "period": {"type": "rolling", "days": 30},
       "conditions": {
         "rfm": {"frequency_min": 2, "has_purchased": false},
@@ -117,7 +141,9 @@ Base URL: `https://your-server/api`
 
 ### `GET /api/segments/{segment_id}`
 
-Полный объект одного сегмента (те же поля что в списке).
+Полный объект одного сегмента. Возвращает 404 если сегмент не найден или принадлежит другому пользователю.
+
+**Headers:** `X-User-Id: user@example.com`
 
 **Response** — тот же объект сегмента без обёртки `segments: [...]`.
 
@@ -125,16 +151,13 @@ Base URL: `https://your-server/api`
 
 ### `DELETE /api/segments/{segment_id}`
 
-Удалить сегмент.
+Удалить сегмент. Возвращает 404 если сегмент не найден или чужой.
+
+**Headers:** `X-User-Id: user@example.com`
 
 **Response**
 ```json
 {"success": true}
-```
-
-**Error (404)**
-```json
-{"detail": "Segment not found"}
 ```
 
 ---
@@ -142,16 +165,22 @@ Base URL: `https://your-server/api`
 ## 3. Пример интеграции (псевдокод)
 
 ```typescript
-// Состояние чата сегментации
+const userId = getCurrentUser().email;  // или id из вашей auth
+
+const authHeaders = {
+  'Content-Type': 'application/json',
+  'X-User-Id': userId,
+};
+
+// ── Чат сегментации ─────────────────────────────────────────────────
+
 const [sessionId, setSessionId] = useState<string | null>(null);
 const [messages, setMessages] = useState<Message[]>([]);
-const [segmentSaved, setSegmentSaved] = useState(false);
 
-// Отправить сообщение
 async function sendMessage(text: string) {
   const res = await fetch('/api/segment/chat', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: authHeaders,
     body: JSON.stringify({message: text, session_id: sessionId}),
   });
   const data = await res.json();
@@ -164,35 +193,31 @@ async function sendMessage(text: string) {
   ]);
 
   if (data.segment_saved) {
-    setSegmentSaved(true);
     // показать уведомление + обновить список сегментов
     refreshSegmentList();
   }
 }
 
-// Список сегментов
-async function loadSegments() {
-  const res = await fetch('/api/segments');
-  const {segments} = await res.json();
-  return segments;
+// Восстановить историю после перезагрузки страницы
+async function restoreHistory(sessionId: string) {
+  const res = await fetch(`/api/segment/chat/${sessionId}/history`);
+  const {history} = await res.json();
+  setMessages(history);
 }
 
-// Удалить сегмент
+// ── Список сегментов ─────────────────────────────────────────────────
+
+async function loadSegments() {
+  const res = await fetch('/api/segments', {headers: authHeaders});
+  const {segments} = await res.json();
+  return segments;  // только сегменты текущего пользователя
+}
+
 async function deleteSegment(segmentId: string) {
-  await fetch(`/api/segments/${segmentId}`, {method: 'DELETE'});
+  await fetch(`/api/segments/${segmentId}`, {
+    method: 'DELETE',
+    headers: authHeaders,
+  });
   refreshSegmentList();
 }
 ```
-
----
-
-## 4. Изоляция данных между пользователями
-
-**Текущая реализация: сегменты общие для всех пользователей.**
-
-Таблица `segments` не содержит поля `user_id` — `GET /api/segments` возвращает все сегменты независимо от того, кто их создал.
-
-Если нужна изоляция по пользователям — потребуется доработка бэкенда:
-- Добавить поле `owner` (например, email или user_id из вашей auth-системы)
-- Передавать идентификатор пользователя в заголовке запроса (`X-User-Id`)
-- Фильтровать `list_all()` и `delete()` по `owner`

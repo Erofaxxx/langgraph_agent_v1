@@ -28,8 +28,9 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from config import DB_PATH, MAX_TOKENS, MODEL, MODEL_PROVIDER, OPENROUTER_API_KEY
+from segment_store import _SHARED_OWNER
 from tools import clickhouse_query
-from tools_segmentation import save_segment
+from tools_segmentation import _current_owner, save_segment
 
 # ─── Tools ─────────────────────────────────────────────────────────────────────
 SEGMENT_TOOLS = [clickhouse_query, save_segment]
@@ -475,17 +476,21 @@ class SegmentBuilderAgent:
 
     # ─── Public API ─────────────────────────────────────────────────────────────
 
-    def chat(self, user_message: str, session_id: str) -> dict:
+    def chat(self, user_message: str, session_id: str, owner: str = _SHARED_OWNER) -> dict:
         """
         Один ход в диалоге сегментации.
 
         session_id хранится на фронтенде и передаётся при каждом запросе.
         thread_id в LangGraph = "seg_{session_id}" (не пересекается с аналитикой).
+        owner — значение X-User-Id из API-запроса; изолирует сегменты по пользователям.
         """
         config = {
             "configurable": {"thread_id": f"seg_{session_id}"},
             "recursion_limit": 30,
         }
+        # Устанавливаем owner в ContextVar перед вызовом графа.
+        # save_segment tool читает его оттуда — LLM не может его подменить.
+        token = _current_owner.set(owner)
         try:
             result = self.graph.invoke(
                 {"messages": [HumanMessage(content=user_message)]},
@@ -516,6 +521,8 @@ class SegmentBuilderAgent:
                 "error": str(exc),
                 "traceback": tb.format_exc(),
             }
+        finally:
+            _current_owner.reset(token)
 
     def get_session_history(self, session_id: str) -> list[dict]:
         """Вернуть историю диалога в виде [{role, content}] для фронтенда."""
