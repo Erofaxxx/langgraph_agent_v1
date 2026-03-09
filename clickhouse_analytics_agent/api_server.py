@@ -372,6 +372,109 @@ async def debug_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Segment Builder endpoints ────────────────────────────────────────────────
+
+class SegmentChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+class SegmentChatResponse(BaseModel):
+    success: bool
+    session_id: str
+    text_output: str
+    segment_saved: bool
+    error: Optional[str] = None
+
+
+@app.post(
+    "/api/segment/chat",
+    response_model=SegmentChatResponse,
+    tags=["segmentation"],
+    summary="One turn in a segmentation dialogue",
+)
+async def segment_chat(req: SegmentChatRequest):
+    """
+    Диалог с агентом-сегментатором (synchronous — ответ возвращается сразу).
+
+    Сохраняй `session_id` между вызовами чтобы держать контекст диалога.
+    Если `session_id` не передан — создаётся новая сессия.
+    Флаг `segment_saved: true` означает что сегмент был сохранён в этом ходу.
+    """
+    from segment_agent import get_segment_agent
+    session_id = req.session_id or str(uuid.uuid4())
+    agent = get_segment_agent()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, agent.chat, req.message, session_id)
+    return SegmentChatResponse(
+        success=result["success"],
+        session_id=session_id,
+        text_output=result.get("text_output", ""),
+        segment_saved=result.get("segment_saved", False),
+        error=result.get("error"),
+    )
+
+
+@app.get(
+    "/api/segment/chat/{session_id}/history",
+    tags=["segmentation"],
+    summary="Get segmentation dialogue history",
+)
+async def get_segment_chat_history(session_id: str):
+    """История диалога сессии сегментации в формате [{role, content}]."""
+    from segment_agent import get_segment_agent
+    agent = get_segment_agent()
+    loop = asyncio.get_event_loop()
+    history = await loop.run_in_executor(None, agent.get_session_history, session_id)
+    return {"session_id": session_id, "history": history}
+
+
+@app.get(
+    "/api/segments",
+    tags=["segmentation"],
+    summary="List all saved segments",
+)
+async def list_segments():
+    """Список всех сохранённых сегментов, отсортированных по дате обновления."""
+    from segment_store import get_segment_store
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    segments = await loop.run_in_executor(None, store.list_all)
+    return {"segments": segments}
+
+
+@app.get(
+    "/api/segments/{segment_id}",
+    tags=["segmentation"],
+    summary="Get segment by ID",
+)
+async def get_segment(segment_id: str):
+    """Получить полное определение сегмента по его ID."""
+    from segment_store import get_segment_store
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    seg = await loop.run_in_executor(None, store.get_by_id, segment_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return seg
+
+
+@app.delete(
+    "/api/segments/{segment_id}",
+    tags=["segmentation"],
+    summary="Delete segment by ID",
+)
+async def delete_segment(segment_id: str):
+    """Удалить сегмент по ID."""
+    from segment_store import get_segment_store
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    deleted = await loop.run_in_executor(None, store.delete, segment_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return {"success": True}
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("api_server:app", host=HOST, port=PORT, log_level="info")
