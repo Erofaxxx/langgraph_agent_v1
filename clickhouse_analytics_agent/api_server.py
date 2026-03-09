@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -370,6 +370,128 @@ async def debug_stats():
         return get_logger(DB_PATH).get_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Segment Builder endpoints ────────────────────────────────────────────────
+
+class SegmentChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+class SegmentChatResponse(BaseModel):
+    success: bool
+    session_id: str
+    text_output: str
+    segment_saved: bool
+    error: Optional[str] = None
+
+
+@app.post(
+    "/api/segment/chat",
+    response_model=SegmentChatResponse,
+    tags=["segmentation"],
+    summary="One turn in a segmentation dialogue",
+)
+async def segment_chat(
+    req: SegmentChatRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """
+    Диалог с агентом-сегментатором (synchronous — ответ возвращается сразу).
+
+    Сохраняй `session_id` между вызовами чтобы держать контекст диалога.
+    Если `session_id` не передан — создаётся новая сессия.
+    Флаг `segment_saved: true` означает что сегмент был сохранён в этом ходу.
+
+    Заголовок `X-User-Id` (опционально): изолирует сегменты по пользователю.
+    Без заголовка — сегменты попадают в общее пространство "__shared__".
+    """
+    from segment_agent import get_segment_agent
+    from segment_store import _SHARED_OWNER
+    owner = x_user_id or _SHARED_OWNER
+    session_id = req.session_id or str(uuid.uuid4())
+    agent = get_segment_agent()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, agent.chat, req.message, session_id, owner)
+    return SegmentChatResponse(
+        success=result["success"],
+        session_id=session_id,
+        text_output=result.get("text_output", ""),
+        segment_saved=result.get("segment_saved", False),
+        error=result.get("error"),
+    )
+
+
+@app.get(
+    "/api/segment/chat/{session_id}/history",
+    tags=["segmentation"],
+    summary="Get segmentation dialogue history",
+)
+async def get_segment_chat_history(session_id: str):
+    """История диалога сессии сегментации в формате [{role, content}]."""
+    from segment_agent import get_segment_agent
+    agent = get_segment_agent()
+    loop = asyncio.get_event_loop()
+    history = await loop.run_in_executor(None, agent.get_session_history, session_id)
+    return {"session_id": session_id, "history": history}
+
+
+@app.get(
+    "/api/segments",
+    tags=["segmentation"],
+    summary="List all saved segments",
+)
+async def list_segments(
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """Список сегментов текущего пользователя (X-User-Id), отсортированных по дате обновления."""
+    from segment_store import _SHARED_OWNER, get_segment_store
+    owner = x_user_id or _SHARED_OWNER
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    segments = await loop.run_in_executor(None, store.list_all, owner)
+    return {"segments": segments}
+
+
+@app.get(
+    "/api/segments/{segment_id}",
+    tags=["segmentation"],
+    summary="Get segment by ID",
+)
+async def get_segment(
+    segment_id: str,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """Получить сегмент по ID. Возвращает 404 если сегмент не найден или принадлежит другому пользователю."""
+    from segment_store import _SHARED_OWNER, get_segment_store
+    owner = x_user_id or _SHARED_OWNER
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    seg = await loop.run_in_executor(None, store.get_by_id, segment_id, owner)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return seg
+
+
+@app.delete(
+    "/api/segments/{segment_id}",
+    tags=["segmentation"],
+    summary="Delete segment by ID",
+)
+async def delete_segment(
+    segment_id: str,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """Удалить сегмент. Возвращает 404 если сегмент не найден или принадлежит другому пользователю."""
+    from segment_store import _SHARED_OWNER, get_segment_store
+    owner = x_user_id or _SHARED_OWNER
+    store = get_segment_store()
+    loop = asyncio.get_event_loop()
+    deleted = await loop.run_in_executor(None, store.delete, segment_id, owner)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return {"success": True}
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
