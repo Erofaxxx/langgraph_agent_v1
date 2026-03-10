@@ -27,7 +27,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from config import DB_PATH, MAX_TOKENS, MODEL, MODEL_PROVIDER, OPENROUTER_API_KEY
+from config import ALLOWED_MODELS, DB_PATH, MAX_TOKENS, MODEL, MODEL_PROVIDER, OPENROUTER_API_KEY
 from segment_store import _SHARED_OWNER
 from tools import clickhouse_query
 from tools_segmentation import _current_owner, save_segment
@@ -104,23 +104,23 @@ SQL в поле `sql_query` должен возвращать `client_id` (не 
 ### Временное окно
 ```sql
 -- rolling N дней (для dm_client_profile)
-WHERE days_since_last_visit <= {N}
+WHERE days_since_last_visit <= {{N}}
 
 -- rolling по дате визита (visits, dm_client_journey)
-WHERE date >= today() - INTERVAL {N} DAY
+WHERE date >= today() - INTERVAL {{N}} DAY
 
 -- fixed период
-WHERE date BETWEEN '{from}' AND '{to}'
+WHERE date BETWEEN '{{from}}' AND '{{to}}'
 
 -- когорта по первому визиту
-WHERE toYYYYMM(first_visit_date) = {YYYYMM}
+WHERE toYYYYMM(first_visit_date) = {{YYYYMM}}
 ```
 
 ### Финальный SQL (возвращает client_id)
 ```sql
 SELECT DISTINCT client_id
 FROM dm_client_profile
-WHERE {условия}
+WHERE {{условия}}
 LIMIT 500000
 ```
 
@@ -285,13 +285,16 @@ class SegmentBuilderAgent:
     в системный промпт — агент адаптируется к изменениям схемы при перезапуске.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str = MODEL) -> None:
         if not OPENROUTER_API_KEY:
             raise ValueError("OPENROUTER_API_KEY is not set")
 
+        # ── Resolve provider from model name ─────────────────────────────
+        provider = ALLOWED_MODELS.get(model, MODEL_PROVIDER)
+
         # ── LLM (тот же endpoint, что и основной агент) ───────────────────
         kwargs: dict = dict(
-            model=MODEL,
+            model=model,
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
             max_tokens=MAX_TOKENS,
@@ -300,7 +303,7 @@ class SegmentBuilderAgent:
                 "X-Title": "ClickHouse Segment Builder",
             },
         )
-        if MODEL_PROVIDER == "anthropic":
+        if provider == "anthropic":
             kwargs["extra_body"] = {
                 "provider": {
                     "order": ["Anthropic"],
@@ -324,7 +327,7 @@ class SegmentBuilderAgent:
         )
 
         # ── Флаг провайдера для промпт-кэширования ─────────────────────
-        is_anthropic = MODEL_PROVIDER == "anthropic"
+        is_anthropic = provider == "anthropic"
 
         # ── Граф ──────────────────────────────────────────────────────────
         llm_with_tools = self.llm.bind_tools(SEGMENT_TOOLS)
@@ -441,7 +444,7 @@ class SegmentBuilderAgent:
         graph.add_edge("tools", "agent")
         self.graph = graph.compile(checkpointer=self.memory)
 
-        print(f"✅ SegmentBuilderAgent ready | model: {MODEL} | schema: {self.schema_section[:60]}…")
+        print(f"✅ SegmentBuilderAgent ready | provider: {provider} | model: {model} | schema: {self.schema_section[:60]}…")
 
     # ─── Schema fetch ───────────────────────────────────────────────────────────
 
@@ -570,15 +573,13 @@ class SegmentBuilderAgent:
         return ""
 
 
-# ─── Singleton ──────────────────────────────────────────────────────────────────
-_segment_agent: Optional[SegmentBuilderAgent] = None
-_agent_lock = __import__("threading").Lock()
+# ─── Per-model singleton cache ────────────────────────────────────────────────
+_segment_agents: dict[str, SegmentBuilderAgent] = {}
 
 
-def get_segment_agent() -> SegmentBuilderAgent:
-    global _segment_agent
-    if _segment_agent is None:
-        with _agent_lock:
-            if _segment_agent is None:
-                _segment_agent = SegmentBuilderAgent()
-    return _segment_agent
+def get_segment_agent(model: Optional[str] = None) -> SegmentBuilderAgent:
+    """Return (or create) a cached SegmentBuilderAgent instance for the given model."""
+    key = model or MODEL
+    if key not in _segment_agents:
+        _segment_agents[key] = SegmentBuilderAgent(model=key)
+    return _segment_agents[key]

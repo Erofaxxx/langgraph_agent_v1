@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 load_dotenv()
-from config import HOST, PORT, SERVER_URL
+from config import ALLOWED_MODELS, HOST, MODEL, PORT, SERVER_URL
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="ClickHouse Analytics Agent API",
@@ -53,12 +53,13 @@ app.add_middleware(
 JOB_TTL_SECONDS = 7200  # 2 часа
 JobStatus = Literal["pending", "running", "done", "error"]
 _jobs: dict[str, dict] = {}
-def _new_job(session_id: str, query: str) -> str:
+def _new_job(session_id: str, query: str, model: Optional[str] = None) -> str:
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {
         "job_id": job_id,
         "session_id": session_id,
         "query": query,
+        "model": model,   # None → default model
         "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": None,
@@ -82,6 +83,7 @@ def _set_error(job_id: str, error: str) -> None:
 class AnalyzeRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    model: Optional[str] = None  # None → default model from config
 class SubmitResponse(BaseModel):
     """Returned immediately after POST /api/analyze."""
     job_id: str
@@ -112,7 +114,7 @@ async def _run_agent_job(job_id: str) -> None:
     started_at = datetime.now(timezone.utc).isoformat()
     try:
         from agent import get_agent
-        agent = get_agent()
+        agent = get_agent(job.get("model"))
         result = await asyncio.to_thread(
             agent.analyze,
             user_query=job["query"],
@@ -190,6 +192,20 @@ async def info():
             "poll":   "GET  /api/job/{job_id}",
         },
     }
+@app.get("/api/models", summary="List available LLM models")
+async def list_models():
+    """
+    Returns all models the user can choose from.
+    Pass the `id` value in the `model` field of POST /api/analyze
+    or POST /api/segment/chat.
+    """
+    return {
+        "default": MODEL,
+        "models": [
+            {"id": model_id, "provider": provider}
+            for model_id, provider in ALLOWED_MODELS.items()
+        ],
+    }
 # ─── Session endpoints ─────────────────────────────────────────────────────────
 @app.post("/api/session/new", summary="Create a new conversation session")
 async def new_session():
@@ -214,9 +230,16 @@ async def analyze(req: AnalyzeRequest):
     Submit a query to the agent.
     Returns job_id immediately — agent runs in background.
     Poll GET /api/job/{job_id} to get the result.
+
+    Optional `model` field selects the LLM. See GET /api/models for allowed values.
     """
+    if req.model and req.model not in ALLOWED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model '{req.model}'. Allowed: {list(ALLOWED_MODELS.keys())}",
+        )
     session_id = req.session_id or str(uuid.uuid4())
-    job_id = _new_job(session_id=session_id, query=req.query)
+    job_id = _new_job(session_id=session_id, query=req.query, model=req.model)
     # Fire and forget
     asyncio.create_task(_run_agent_job(job_id))
     return SubmitResponse(
@@ -377,6 +400,7 @@ async def debug_stats():
 class SegmentChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    model: Optional[str] = None  # None → default model from config
 
 
 class SegmentChatResponse(BaseModel):
@@ -407,11 +431,16 @@ async def segment_chat(
     Заголовок `X-User-Id` (опционально): изолирует сегменты по пользователю.
     Без заголовка — сегменты попадают в общее пространство "__shared__".
     """
+    if req.model and req.model not in ALLOWED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model '{req.model}'. Allowed: {list(ALLOWED_MODELS.keys())}",
+        )
     from segment_agent import get_segment_agent
     from segment_store import _SHARED_OWNER
     owner = x_user_id or _SHARED_OWNER
     session_id = req.session_id or str(uuid.uuid4())
-    agent = get_segment_agent()
+    agent = get_segment_agent(req.model)
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, agent.chat, req.message, session_id, owner)
     return SegmentChatResponse(
