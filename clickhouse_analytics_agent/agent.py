@@ -45,6 +45,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from config import (
+    ALLOWED_MODELS,
     DB_PATH,
     MAX_AGENT_ITERATIONS,
     MAX_HISTORY_TURNS,
@@ -327,9 +328,9 @@ _OPENROUTER_HEADERS = {
 }
 
 
-def _create_llm() -> ChatOpenAI:
+def _create_llm(model: str, provider: str) -> ChatOpenAI:
     """
-    Return a ChatOpenAI client pointed at OpenRouter for the selected model.
+    Return a ChatOpenAI client pointed at OpenRouter for the given model/provider.
 
     OpenRouter exposes a single OpenAI-compatible endpoint for all providers.
     Prompt caching for Claude models is supported: OpenRouter forwards
@@ -338,13 +339,13 @@ def _create_llm() -> ChatOpenAI:
     (different instances don't share the prompt cache).
     """
     kwargs: dict = dict(
-        model=MODEL,
+        model=model,
         api_key=OPENROUTER_API_KEY,
         base_url="https://openrouter.ai/api/v1",
         max_tokens=MAX_TOKENS,
         default_headers=_OPENROUTER_HEADERS,
     )
-    if MODEL_PROVIDER == "anthropic":
+    if provider == "anthropic":
         kwargs["extra_body"] = {
             "provider": {
                 "order": ["Anthropic"],
@@ -364,15 +365,18 @@ class AnalyticsAgent:
       - Per-request context optimisation: sliding window + message compression
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str = MODEL) -> None:
         if not OPENROUTER_API_KEY:
             raise ValueError(
                 "OPENROUTER_API_KEY is not set in .env. "
                 "Get your key at https://openrouter.ai"
             )
 
+        # ── Resolve provider from model name ─────────────────────────────
+        provider = ALLOWED_MODELS.get(model, MODEL_PROVIDER)
+
         # ── LLM via OpenRouter ────────────────────────────────────────────
-        self.llm = _create_llm()
+        self.llm = _create_llm(model, provider)
 
         # ── SqliteSaver checkpointer ──────────────────────────────────────
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
@@ -382,7 +386,7 @@ class AnalyticsAgent:
         self.schema_section = self._fetch_schema_section()
 
         # ── Provider flag for prompt caching ─────────────────────────────
-        is_anthropic = MODEL_PROVIDER == "anthropic"
+        is_anthropic = provider == "anthropic"
 
         # ── Message builder closure ───────────────────────────────────────
         # Runs before every LLM call inside agent_node.
@@ -554,7 +558,7 @@ class AnalyticsAgent:
 
         caching_info = "prompt caching ON" if is_anthropic else "no prompt caching"
         print(
-            f"✅ AnalyticsAgent ready | provider: {MODEL_PROVIDER} | model: {MODEL} | "
+            f"✅ AnalyticsAgent ready | provider: {provider} | model: {model} | "
             f"router: {ROUTER_MODEL} | {caching_info} | "
             f"skills: {len(SKILLS)} | db: {DB_PATH}"
         )
@@ -836,13 +840,13 @@ class AnalyticsAgent:
         return tool_calls
 
 
-# ─── Global singleton ─────────────────────────────────────────────────────────
-_agent: Optional[AnalyticsAgent] = None
+# ─── Per-model singleton cache ────────────────────────────────────────────────
+_agents: dict[str, AnalyticsAgent] = {}
 
 
-def get_agent() -> AnalyticsAgent:
-    """Return (or create) the global AnalyticsAgent instance."""
-    global _agent
-    if _agent is None:
-        _agent = AnalyticsAgent()
-    return _agent
+def get_agent(model: Optional[str] = None) -> AnalyticsAgent:
+    """Return (or create) a cached AnalyticsAgent instance for the given model."""
+    key = model or MODEL
+    if key not in _agents:
+        _agents[key] = AnalyticsAgent(model=key)
+    return _agents[key]

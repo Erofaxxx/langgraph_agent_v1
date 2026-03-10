@@ -27,6 +27,13 @@ MODEL: str = os.environ.get("MODEL", _PROVIDER_DEFAULT_MODELS.get(MODEL_PROVIDER
 
 MAX_TOKENS: int = int(os.environ.get("MAX_TOKENS", "8192"))
 
+# Supported models: model_name → provider
+# Provider determines prompt-caching strategy and extra_body settings.
+ALLOWED_MODELS: dict[str, str] = {
+    "claude-sonnet-4-6": "anthropic",
+    "deepseek/deepseek-v3.2-speciale": "deepseek",
+}
+
 # Router: дешёвая модель для классификации запросов (~$0.0001 за вызов)
 # Определяет, какие skills нужны для текущего запроса
 ROUTER_MODEL: str = os.environ.get("ROUTER_MODEL", "anthropic/claude-haiku-4.5")
