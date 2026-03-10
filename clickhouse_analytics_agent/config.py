@@ -20,17 +20,17 @@ MODEL_PROVIDER: str = os.environ.get("MODEL_PROVIDER", "anthropic")
 
 # Default model name per provider — can be overridden via MODEL env var.
 _PROVIDER_DEFAULT_MODELS = {
-    "anthropic": "claude-sonnet-4-6",
-    "deepseek":  "deepseek/deepseek-chat",
+    "anthropic": "anthropic/claude-sonnet-4.6",
+    "deepseek":  "deepseek/deepseek-v3.2-speciale",
 }
-MODEL: str = os.environ.get("MODEL", _PROVIDER_DEFAULT_MODELS.get(MODEL_PROVIDER, "claude-sonnet-4-6"))
+MODEL: str = os.environ.get("MODEL", _PROVIDER_DEFAULT_MODELS.get(MODEL_PROVIDER, "anthropic/claude-sonnet-4.6"))
 
 MAX_TOKENS: int = int(os.environ.get("MAX_TOKENS", "8192"))
 
 # Supported models: model_name → provider
 # Provider determines prompt-caching strategy and extra_body settings.
 ALLOWED_MODELS: dict[str, str] = {
-    "claude-sonnet-4-6": "anthropic",
+    "anthropic/claude-sonnet-4.6": "anthropic",
     "deepseek/deepseek-v3.2-speciale": "deepseek",
 }
 
