@@ -312,7 +312,7 @@ dm_traffic_performance считает ВСЕ визиты, включая ано
 dm_client_journey / dm_client_profile / dm_ml_features — только clientID > 0.
 Разница = анонимные сессии. Это архитектурное решение, не ошибка данных.
 
-## Товарная аналитика
+# Товарная аналитика
 
 Никогда не используй ARRAY JOIN на таблице visits для товарных данных.
 
@@ -321,11 +321,12 @@ dm_orders — для вопросов про выручку, средний че
 Пример: SELECT utm_source, avg(order_revenue) AS avg_check, count() AS orders FROM dm_orders GROUP BY utm_source
 
 dm_purchases — для вопросов про товары: топ продаж, популярность, выручка по товарам.
-Поля: purchase_id, client_id, date, order_id, product_id, product_name, product_category, estimated_revenue, utm_source, utm_campaign, device, city.
-estimated_revenue — расчётная выручка на уровне товара (NULL у 18% строк — товары без одиночных заказов в истории).
-Ранжируй по count() для популярности, по sum(estimated_revenue) для выручки.
-Пример топ товаров: SELECT product_name, count() AS orders, round(sum(estimated_revenue)) AS revenue FROM dm_purchases GROUP BY product_name ORDER BY orders DESC LIMIT 20
-⚠️ Для точной выручки заказа всегда используй dm_orders. dm_purchases.estimated_revenue — приближение, сумма по заказу может не совпадать с order_revenue если есть NULL товары.
+Поля: purchase_id, client_id, date, order_id, product_id, product_name, product_category, quantity, estimated_revenue, utm_source, utm_campaign, device, city.
+quantity — штук продано (заполнено только для одиночных заказов, NULL если в заказе несколько позиций).
+estimated_revenue — расчётная выручка на уровне товара (NULL если хотя бы один товар в заказе без известной цены — ~18% строк).
+Ранжируй по count() для числа заказов, по sum(quantity) для штук, по sum(estimated_revenue) для выручки.
+Пример топ товаров: SELECT product_name, count() AS orders, sum(quantity) AS qty, round(sum(estimated_revenue)) AS revenue FROM dm_purchases GROUP BY product_name ORDER BY orders DESC LIMIT 20
+⚠️ Для точной выручки заказа всегда используй dm_orders. dm_purchases.estimated_revenue — приближение на уровне позиции.
 Связь витрин: dm_purchases.order_id = dm_orders.order_id — для drill-down от товара к точной выручке заказа.
 
 ## Стиль ответа
