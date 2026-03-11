@@ -23,10 +23,12 @@ Context optimisations (in _build_messages, a per-instance closure):
      tool_calls + ToolMessages) is replaced by a compact SQL/row-count AIMessage.
      The final agent answer (shown to user) is preserved verbatim.
      Tool chain: ~830 tokens → ~50 tokens; final answer kept as-is.
-  4. Intra-turn ToolMessage compression: within the current request, once
-     python_analysis has been called, preceding clickhouse_query ToolMessages have
-     their dtypes + preview_first_5_rows stripped.  Also drops stdout from earlier
-     python_analysis runs in a retry scenario.
+  4. Intra-turn ToolMessage compression: within the current request, a
+     clickhouse_query ToolMessage is compressed (col_stats stripped, only
+     row_count/columns/parquet_path kept) as soon as any AIMessage follows it —
+     i.e. the LLM already consumed col_stats once, so it is not needed again.
+     python_analysis ToolMessages are compressed only when a later python_analysis
+     call follows (retry scenario).
   5. Prompt caching: system prompt + last history message marked with cache_control
      (Anthropic via OpenRouter) — ~68 % input-token savings across tool calls.
 """
@@ -426,6 +428,13 @@ class AnalyticsAgent:
 
             # ── 3. Intra-turn ToolMessage compression ──────────────────────
             current_msgs = messages[current_turn_start:]
+            # Positions where an AIMessage follows — used to detect that the
+            # LLM already consumed a ToolMessage at least once.
+            ai_positions: set[int] = {
+                i
+                for i, m in enumerate(current_msgs)
+                if isinstance(m, AIMessage)
+            }
             py_positions: set[int] = {
                 i
                 for i, m in enumerate(current_msgs)
@@ -434,11 +443,11 @@ class AnalyticsAgent:
             }
             compressed_current: list = []
             for i, msg in enumerate(current_msgs):
-                if (
-                    isinstance(msg, ToolMessage)
-                    and (getattr(msg, "name", "") or "") in ("clickhouse_query", "python_analysis")
-                    and any(j > i for j in py_positions)
-                ):
+                name = (getattr(msg, "name", "") or "") if isinstance(msg, ToolMessage) else ""
+                if isinstance(msg, ToolMessage) and name == "clickhouse_query" and any(j > i for j in ai_positions):
+                    # LLM already saw col_stats → strip it for subsequent calls
+                    compressed_current.append(_compress_tool_message(msg))
+                elif isinstance(msg, ToolMessage) and name == "python_analysis" and any(j > i for j in py_positions):
                     compressed_current.append(_compress_tool_message(msg))
                 else:
                     compressed_current.append(msg)
