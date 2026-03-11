@@ -487,8 +487,21 @@ class AnalyticsAgent:
                     ]
                     if tool_uses_so_far > 0:
                         counter = f"[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
-                        if remaining <= 3:
-                            counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
+                        if remaining <= 0:
+                            counter += (
+                                " ⛔ ЛИМИТ ИСЧЕРПАН. Немедленно дай финальный ответ на основе уже собранных данных."
+                                " НЕ вызывай инструменты. Используй только то, что уже есть в контексте."
+                            )
+                        elif remaining == 1:
+                            counter += (
+                                " 🚨 Остался 1 вызов инструмента. После него ты ОБЯЗАН дать финальный ответ."
+                                " Используй последний вызов только если он критически необходим."
+                            )
+                        elif remaining <= 3:
+                            counter += (
+                                " ⚠️ Мало итераций. Если данных достаточно — отвечай сейчас."
+                                " Объединяй оставшиеся запросы в один через WITH/CTE."
+                            )
                         content_blocks.append({"type": "text", "text": counter})
                     try:
                         compressed_current[0] = first.model_copy(
@@ -500,8 +513,21 @@ class AnalyticsAgent:
                         compressed_current[0] = new_first
                 elif tool_uses_so_far > 0:
                     counter = f"\n[⚡ Итерации: {tool_uses_so_far}/{MAX_AGENT_ITERATIONS}, осталось: {remaining}]"
-                    if remaining <= 3:
-                        counter += " — если данных достаточно, давай финальный ответ прямо сейчас."
+                    if remaining <= 0:
+                        counter += (
+                            " ⛔ ЛИМИТ ИСЧЕРПАН. Немедленно дай финальный ответ на основе уже собранных данных."
+                            " НЕ вызывай инструменты. Используй только то, что уже есть в контексте."
+                        )
+                    elif remaining == 1:
+                        counter += (
+                            " 🚨 Остался 1 вызов инструмента. После него ты ОБЯЗАН дать финальный ответ."
+                            " Используй последний вызов только если он критически необходим."
+                        )
+                    elif remaining <= 3:
+                        counter += (
+                            " ⚠️ Мало итераций. Если данных достаточно — отвечай сейчас."
+                            " Объединяй оставшиеся запросы в один через WITH/CTE."
+                        )
                     try:
                         compressed_current[0] = first.model_copy(
                             update={"content": old_content + counter}
@@ -564,6 +590,23 @@ class AnalyticsAgent:
 
         def should_continue(state: AgentState) -> str:
             last = state["messages"][-1]
+
+            # ── Жёсткий стоп по бюджету итераций ──────────────────────────
+            # Считаем ToolMessages начиная с последнего HumanMessage (текущий ход)
+            messages = state["messages"]
+            human_indices = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+            current_turn_start = human_indices[-1] if human_indices else 0
+            current_tool_uses = sum(
+                1 for m in messages[current_turn_start:]
+                if isinstance(m, ToolMessage)
+            )
+            if current_tool_uses >= MAX_AGENT_ITERATIONS:
+                # Лимит исчерпан — выходим без ошибки.
+                # Агент уже видел предупреждение в счётчике,
+                # поэтому последний AIMessage должен содержать частичный ответ.
+                return END
+            # ──────────────────────────────────────────────────────────────
+
             if hasattr(last, "tool_calls") and last.tool_calls:
                 return "tools"
             return END
@@ -682,7 +725,8 @@ class AnalyticsAgent:
         """
         config = {
             "configurable": {"thread_id": session_id},
-            "recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1,
+            # router(1) + first_agent(1) + N cycles × 2 + запас(5)
+            "recursion_limit": 2 + MAX_AGENT_ITERATIONS * 2 + 5,
         }
 
         try:

@@ -489,7 +489,8 @@ class SegmentBuilderAgent:
         """
         config = {
             "configurable": {"thread_id": f"seg_{session_id}"},
-            "recursion_limit": 30,
+            # first_agent(1) + N cycles × 2 + запас(5)
+            "recursion_limit": 2 + _MAX_SEG_TURNS * 2 + 5,  # = 23
         }
         # Устанавливаем owner в ContextVar перед вызовом графа.
         # save_segment tool читает его оттуда — LLM не может его подменить.
