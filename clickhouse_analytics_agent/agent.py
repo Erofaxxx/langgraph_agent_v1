@@ -588,6 +588,26 @@ class AnalyticsAgent:
             response = self.llm.bind_tools(TOOLS).invoke(messages)
             return {"messages": [response]}
 
+        def force_summary_node(state: AgentState) -> dict:
+            """Вызывается когда лимит итераций исчерпан.
+
+            Делает один финальный вызов LLM *без инструментов*, чтобы получить
+            структурированное резюме: что сделано, что не успел, что исследовать дальше.
+            """
+            messages = _build_messages(state)
+            summary_request = HumanMessage(content=(
+                "⛔ Лимит итераций исчерпан. Дай структурированный финальный ответ:\n\n"
+                "1. **Что сделано** — какие данные собраны, какие запросы выполнены, "
+                "какие результаты получены\n"
+                "2. **Что не успел** — какие шаги плана остались невыполненными\n"
+                "3. **Что исследовать дальше** — конкретные вопросы для следующего запроса\n\n"
+                "Отвечай только текстом. Не вызывай инструменты."
+            ))
+            # self.llm без .bind_tools() — LLM не знает о инструментах,
+            # tool_calls физически невозможны
+            response = self.llm.invoke(messages + [summary_request])
+            return {"messages": [response]}
+
         def should_continue(state: AgentState) -> str:
             last = state["messages"][-1]
 
@@ -601,10 +621,9 @@ class AnalyticsAgent:
                 if isinstance(m, ToolMessage)
             )
             if current_tool_uses >= MAX_AGENT_ITERATIONS:
-                # Лимит исчерпан — выходим без ошибки.
-                # Агент уже видел предупреждение в счётчике,
-                # поэтому последний AIMessage должен содержать частичный ответ.
-                return END
+                # Лимит исчерпан — направляем в force_summary вместо тихого END.
+                # Там LLM вызывается без инструментов и подводит структурированный итог.
+                return "force_summary"
             # ──────────────────────────────────────────────────────────────
 
             if hasattr(last, "tool_calls") and last.tool_calls:
@@ -615,14 +634,16 @@ class AnalyticsAgent:
         graph.add_node("router", self._router_node)
         graph.add_node("agent", agent_node)
         graph.add_node("tools", tool_node)
+        graph.add_node("force_summary", force_summary_node)
         graph.set_entry_point("router")
         graph.add_edge("router", "agent")
         graph.add_conditional_edges(
             "agent",
             should_continue,
-            {"tools": "tools", END: END},
+            {"tools": "tools", END: END, "force_summary": "force_summary"},
         )
         graph.add_edge("tools", "agent")
+        graph.add_edge("force_summary", END)
         self.graph = graph.compile(checkpointer=self.memory)
 
         caching_info = "prompt caching ON" if is_anthropic else "no prompt caching"
@@ -725,8 +746,8 @@ class AnalyticsAgent:
         """
         config = {
             "configurable": {"thread_id": session_id},
-            # router(1) + first_agent(1) + N cycles × 2 + запас(5)
-            "recursion_limit": 2 + MAX_AGENT_ITERATIONS * 2 + 5,
+            # router(1) + first_agent(1) + N cycles × 2 + запас(5) + force_summary(1)
+            "recursion_limit": 2 + MAX_AGENT_ITERATIONS * 2 + 5 + 1,
         }
 
         try:
