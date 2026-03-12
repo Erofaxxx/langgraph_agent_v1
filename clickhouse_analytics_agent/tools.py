@@ -8,6 +8,7 @@ Three tools:
 """
 
 import json
+import threading
 from typing import Optional
 
 from langchain_core.tools import tool
@@ -16,6 +17,12 @@ from langchain_core.tools import tool
 # Created on first use so config is loaded before connecting.
 _ch_client = None
 _sandbox = None
+
+# Serialise ClickHouse access: the client uses a single connection that does
+# not support concurrent queries. The lock prevents "Attempt to execute
+# concurrent queries within the same session" errors when the agent issues
+# two clickhouse_query tool-calls in the same LLM turn.
+_ch_lock = threading.Lock()
 
 
 def _get_ch_client():
@@ -73,7 +80,8 @@ def clickhouse_query(sql: str) -> str:
         sql: ClickHouse SELECT statement.
     """
     try:
-        result = _get_ch_client().execute_query(sql)
+        with _ch_lock:
+            result = _get_ch_client().execute_query(sql)
         return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})
