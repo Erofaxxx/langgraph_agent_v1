@@ -116,10 +116,21 @@ class PythonSandbox:
         stdout_capture = io.StringIO()
         plots: list[str] = []
 
+        # Libraries are placed in globals so they remain accessible inside
+        # user-defined lambdas called back by pandas/numpy (e.g. .apply()).
+        # local_vars (df, result, df_info) take precedence over globals in exec.
+        sandbox_globals = {
+            "__builtins__": __builtins__,
+            "pd": pd,
+            "np": np,
+            "plt": plt,
+            "sns": sns,
+        }
+
         try:
             # ── Execute code with captured stdout ──────────────────────────
             with contextlib.redirect_stdout(stdout_capture):
-                exec(code, {"__builtins__": __builtins__}, local_vars)  # noqa: S102
+                exec(code, sandbox_globals, local_vars)  # noqa: S102
 
             # ── Capture all matplotlib figures ─────────────────────────────
             for fig_num in plt.get_fignums():

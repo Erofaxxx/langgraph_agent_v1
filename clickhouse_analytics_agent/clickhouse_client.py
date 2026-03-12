@@ -132,20 +132,15 @@ class ClickHouseClient:
 
     def execute_query(self, sql: str, limit: int = 500000) -> dict:
         """
-        Execute a SELECT query.
-        1. Validates it starts with SELECT.
-        2. Appends LIMIT if missing.
-        3. Checks Parquet cache (keyed by MD5 of SQL) — returns cached result if fresh.
-        4. If not cached: runs query, saves to Parquet, returns metadata + col_stats.
+        Execute a read-only query against ClickHouse.
+        1. Appends LIMIT if missing.
+        2. Checks Parquet cache (keyed by MD5 of SQL) — returns cached result if fresh.
+        3. If not cached: runs query, saves to Parquet, returns metadata + col_stats.
+
+        Note: write-protection is enforced at the DB level (user has SELECT grants only).
+        WITH/CTE queries (starting with WITH) and leading SQL comments are fully supported.
         """
         sql_stripped = sql.strip()
-
-        # Security: only SELECT allowed
-        if not sql_stripped.upper().startswith("SELECT"):
-            return {
-                "success": False,
-                "error": "Only SELECT queries are allowed. INSERT/UPDATE/DELETE/DROP are forbidden.",
-            }
 
         # Auto-add LIMIT if missing
         if "LIMIT" not in sql_stripped.upper():
