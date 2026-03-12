@@ -28,7 +28,7 @@ SKILLS: dict[str, dict] = {
         "router_hint": (
           "товар|продукт|топ|sku|ассортимент|выручка по товарам|dm_products|dm_purchases|позиция|категория|штуки|количество"
         ),
-        "full_path": str(SKILLS_DIR / "product_analytics.md"),
+        "full_path": _SKILLS_DIR / "product_analytics.md",
     },
     "python_analysis": {
         "router_hint": (
