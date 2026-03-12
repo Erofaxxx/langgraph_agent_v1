@@ -314,20 +314,10 @@ dm_client_journey / dm_client_profile / dm_ml_features — только clientID
 
 # Товарная аналитика
 
-Никогда не используй ARRAY JOIN на таблице visits для товарных данных.
-
-dm_orders — для вопросов про выручку, средний чек, динамику продаж.
-Поля: order_id, client_id, date, order_revenue, utm_source, utm_campaign, device, city.
-Пример: SELECT utm_source, avg(order_revenue) AS avg_check, count() AS orders FROM dm_orders GROUP BY utm_source
-
-dm_purchases — для вопросов про товары: топ продаж, популярность, выручка по товарам.
-Поля: purchase_id, client_id, date, order_id, product_id, product_name, product_category, quantity, estimated_revenue, utm_source, utm_campaign, device, city.
-quantity — штук продано (заполнено только для одиночных заказов, NULL если в заказе несколько позиций).
-estimated_revenue — расчётная выручка на уровне товара (NULL если хотя бы один товар в заказе без известной цены — ~18% строк).
-Ранжируй по count() для числа заказов, по sum(quantity) для штук, по sum(estimated_revenue) для выручки.
-Пример топ товаров: SELECT product_name, count() AS orders, sum(quantity) AS qty, round(sum(estimated_revenue)) AS revenue FROM dm_purchases GROUP BY product_name ORDER BY orders DESC LIMIT 20
-⚠️ Для точной выручки заказа всегда используй dm_orders. dm_purchases.estimated_revenue — приближение на уровне позиции.
-Связь витрин: dm_purchases.order_id = dm_orders.order_id — для drill-down от товара к точной выручке заказа.
+⚠️ Никогда не используй ARRAY JOIN на таблице visits для товарных данных — только витрины dm_orders, dm_purchases, dm_products.
+dm_orders (1 строка = 1 заказ) → dm_purchases (1 строка = 1 позиция) → dm_products (1 строка = 1 товар, агрегат за всё время). Связь: dm_purchases.order_id = dm_orders.order_id.
+Для рейтингов и топов — dm_products (без JOIN). Для детализации по позициям — dm_purchases JOIN dm_orders. Для выручки заказов и атрибуции (first/last touch) — dm_orders.
+dm_purchases не содержит utm/device/city — они только в dm_orders.
 
 ## Стиль ответа
 * Markdown: заголовки ##/###, таблицы, **жирный** для ключевых цифр
