@@ -24,6 +24,12 @@ SKILLS: dict[str, dict] = {
         ),
         "full_path": _SKILLS_DIR / "clickhouse_querying.md",
     },
+    "product_analytics": {
+        "router_hint": (
+          "товар|продукт|топ|sku|ассортимент|выручка по товарам|dm_products|dm_purchases|позиция|категория|штуки|количество"
+        ),
+        "full_path": str(SKILLS_DIR / "product_analytics.md"),
+    },
     "python_analysis": {
         "router_hint": (
             "анализ данных Python, рассчитать метрику, посчитать, сравнить значения, "
@@ -44,7 +50,8 @@ SKILLS: dict[str, dict] = {
         "router_hint": (
             "ROAS, CPC, CPM, CTR, CPA, кампании, расходы, бюджет, "
             "рекламные кампании, utm_campaign, dm_campaigns, конверсия кампаний, "
-            "стоимость привлечения, окупаемость рекламы, spend"
+            "стоимость привлечения, окупаемость рекламы, spend,"
+            "first touch|last touch|атрибуция|откуда покупатели|dm_orders"
         ),
         "full_path": _SKILLS_DIR / "campaign_analysis.md",
     },
