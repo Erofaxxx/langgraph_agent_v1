@@ -121,10 +121,15 @@ class ClickHouseClient:
                     "nulls": null_count,
                 }
             else:
-                sample = [str(v) for v in non_null.value_counts().head(3).index.tolist()]
+                try:
+                    top_values = non_null.value_counts().head(3).index.tolist()
+                except TypeError:
+                    # Array/complex columns: lists are unhashable, take first 3 values
+                    top_values = non_null.iloc[:3].tolist()
+                sample = [str(v)[:300] for v in top_values]
                 stats[col] = {
                     "type": str(series.dtype),
-                    "unique": int(non_null.nunique()),
+                    "unique": int(non_null.nunique()) if not any(isinstance(v, list) for v in non_null.iloc[:100]) else "n/a (array)",
                     "sample": sample,
                     "nulls": null_count,
                 }
