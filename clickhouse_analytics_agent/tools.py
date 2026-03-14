@@ -11,10 +11,12 @@ import json
 import threading
 from typing import Optional
 
-# Maximum tool result size sent to the LLM.
-# Prevents context explosion when data contains unexpectedly large values.
-# ~20 000 chars ≈ 5 000 tokens — enough for any normal col_stats or analysis output.
-_MAX_RESULT_CHARS = 20_000
+# Hard cap on tool result size sent to the LLM — last-resort safety net.
+# Root causes (huge col_stats samples, df.to_string()) are fixed upstream;
+# this cap only triggers if something unexpected slips through.
+# 50 000 chars ≈ 12 500 tokens. Raised from 20 000 to avoid cutting off
+# legitimate stdout/result output that the agent needs to see in full.
+_MAX_RESULT_CHARS = 50_000
 
 
 def _cap_result(text: str) -> str:
