@@ -34,9 +34,10 @@ ALLOWED_MODELS: dict[str, str] = {
     "deepseek/deepseek-v3.2": "deepseek",
 }
 
-# Router: дешёвая модель для классификации запросов (~$0.0001 за вызов)
-# Определяет, какие skills нужны для текущего запроса
-ROUTER_MODEL: str = os.environ.get("ROUTER_MODEL", "anthropic/claude-haiku-4.5")
+# Router: модель для классификации запросов и загрузки нужных skills.
+# Sonnet выбран намеренно: правильно игнорирует приветствия в начале сложных запросов,
+# надёжно возвращает строгий JSON без объяснений.
+ROUTER_MODEL: str = os.environ.get("ROUTER_MODEL", "anthropic/claude-sonnet-4.6")
 
 # ─── ClickHouse ──────────────────────────────────────────────────────────────
 CLICKHOUSE_HOST: str = (

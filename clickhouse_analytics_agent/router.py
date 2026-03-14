@@ -21,12 +21,13 @@ from skills._registry import SKILLS
 
 # ─── Ленивый синглтон роутера ─────────────────────────────────────────────────
 _router_llm: Optional[ChatOpenAI] = None
+_router_llm_model: Optional[str] = None  # track which model is cached
 
 
 def _get_router_llm() -> ChatOpenAI:
-    """Создать (один раз) ChatOpenAI клиент для роутера."""
-    global _router_llm
-    if _router_llm is None:
+    """Создать (или пересоздать при смене модели) ChatOpenAI клиент для роутера."""
+    global _router_llm, _router_llm_model
+    if _router_llm is None or _router_llm_model != ROUTER_MODEL:
         _router_llm = ChatOpenAI(
             model=ROUTER_MODEL,
             api_key=OPENROUTER_API_KEY,
@@ -38,6 +39,7 @@ def _get_router_llm() -> ChatOpenAI:
                 "X-Title": "ClickHouse Analytics Agent Router",
             },
         )
+        _router_llm_model = ROUTER_MODEL
     return _router_llm
 
 
@@ -61,15 +63,19 @@ def _build_router_prompt() -> str:
 - Если запрос требует вычислений/анализа → обязательно включи "python_analysis"
 - Если запрос про график/визуализацию → включи "visualization"
 - Для аналитических вопросов без явного графика включи и "clickhouse_querying" и "python_analysis"
-- Если запрос не требует данных (приветствие, общий вопрос) → верни []
+- Верни [] ТОЛЬКО если сообщение целиком состоит из приветствия или светской болтовни БЕЗ каких-либо вопросов про данные.
+  Приветствие в НАЧАЛЕ сообщения ("привет", "hello", "добрый день") не делает весь запрос приветствием — классифицируй по содержанию вопроса, а не по первому слову.
 - Не добавляй skills которые явно не нужны
-- Отвечай ТОЛЬКО валидным JSON-массивом без объяснений
+- Отвечай ТОЛЬКО валидным JSON-массивом, без пояснений, без markdown-обёртки
 
 Примеры:
 - "Сколько визитов за прошлый месяц?" → ["clickhouse_querying"]
+- "Привет, какая выручка за вчера?" → ["clickhouse_querying"]
+- "Добрый день! Покажи топ кампаний и построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Какой ROAS у кампаний? Построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Когорты клиентов за 2024 год" → ["clickhouse_querying", "python_analysis", "cohort_analysis"]
 - "Привет" → []
+- "Как дела?" → []
 """
 
 

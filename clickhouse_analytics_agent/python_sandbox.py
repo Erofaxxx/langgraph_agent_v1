@@ -173,14 +173,29 @@ class PythonSandbox:
                 result_value = str(result_value)
 
             # ── Truncate stdout to avoid flooding LLM context ──────────────
-            _MAX_OUTPUT = 3000
+            # 8 000 chars ≈ 100-150 rows of tabular data — enough to understand
+            # structure and values without causing context explosion.
+            # head+tail strategy keeps both schema rows and tail rows visible.
+            _MAX_OUTPUT = 8000
             raw_output = stdout_capture.getvalue()
             if len(raw_output) > _MAX_OUTPUT:
                 half = _MAX_OUTPUT // 2
                 raw_output = (
                     raw_output[:half]
-                    + f"\n… [stdout truncated: {len(raw_output)} chars total] …\n"
+                    + f"\n… [stdout truncated, showing first+last {half} chars"
+                    f" of {len(raw_output)} total — data in parquet is complete] …\n"
                     + raw_output[-half:]
+                )
+
+            # ── Truncate result variable ────────────────────────────────────
+            # result is shown to the user; keep it readable but bounded.
+            _MAX_RESULT = 12000
+            if result_value and len(result_value) > _MAX_RESULT:
+                half_r = _MAX_RESULT // 2
+                result_value = (
+                    result_value[:half_r]
+                    + f"\n… [result truncated: {len(result_value)} chars total] …\n"
+                    + result_value[-half_r:]
                 )
 
             return {
@@ -192,14 +207,14 @@ class PythonSandbox:
             }
 
         except Exception as exc:
-            # Keep only the last 1 500 chars of the traceback — the tail contains
+            # Keep only the last 2 000 chars of the traceback — the tail contains
             # the actual error line and is sufficient for the LLM to self-correct.
             full_tb = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-            error_text = full_tb[-1500:] if len(full_tb) > 1500 else full_tb
+            error_text = full_tb[-2000:] if len(full_tb) > 2000 else full_tb
             raw_output = stdout_capture.getvalue()
             return {
                 "success": False,
-                "output": raw_output[:3000] if len(raw_output) > 3000 else raw_output,
+                "output": raw_output[:8000] if len(raw_output) > 8000 else raw_output,
                 "result": None,
                 "plots": plots,  # return any plots captured before the error
                 "error": error_text,
