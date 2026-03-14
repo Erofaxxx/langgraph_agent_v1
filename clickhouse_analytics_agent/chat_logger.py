@@ -110,6 +110,39 @@ class ChatLogger:
             # Never let logger errors reach the caller (agent result is already returned)
             print(f"[ChatLogger] WARNING: log_turn failed silently: {exc}")
 
+    def log_router(
+        self,
+        session_id: str,
+        turn_index: int,
+        active_skills: list[str],
+        query_preview: str,
+        created_at: str,
+    ) -> None:
+        """
+        Log the router classification result for a single turn.
+
+        Stored as event_type='router_result', tool_name=None.
+        content: JSON with active_skills list and query preview.
+        Completely safe — all exceptions are swallowed.
+        """
+        try:
+            content = json.dumps(
+                {"active_skills": active_skills, "query": query_preview[:200]},
+                ensure_ascii=False,
+            )
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO agent_logs
+                       (session_id, turn_index, seq, event_type, tool_name,
+                        tool_call_id, content, token_est, duration_ms, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (session_id, turn_index, -1, "router_result", None,
+                     None, content, len(content) // 4, None, created_at),
+                )
+                self._conn.commit()
+        except Exception as exc:
+            print(f"[ChatLogger] WARNING: log_router failed silently: {exc}")
+
     def get_session_logs(self, session_id: str) -> list[dict]:
         """Return all events for a session, ordered by turn and seq."""
         cur = self._conn.execute(
