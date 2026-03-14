@@ -62,6 +62,7 @@ class ChatLogger:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")  # wait up to 5s on lock
         self._lock = threading.Lock()
         self._init_schema()
         print(f"✅ ChatLogger ready | db: {db_path}")

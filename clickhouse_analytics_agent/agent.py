@@ -389,6 +389,7 @@ class AnalyticsAgent:
 
         # ── SqliteSaver checkpointer ──────────────────────────────────────
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 5000")  # wait up to 5s on lock
         self.memory = SqliteSaver(conn)
 
         # ── Fetch schema once at startup ──────────────────────────────────
@@ -764,6 +765,13 @@ class AnalyticsAgent:
 
         except Exception as exc:
             import traceback as tb
+            # Try to salvage accumulated messages for the logger even on error
+            _err_msgs = []
+            try:
+                snapshot = self.graph.get_state(config)
+                _err_msgs = list(snapshot.values.get("messages", []))
+            except Exception:
+                pass
             return {
                 "success": False,
                 "session_id": session_id,
@@ -772,6 +780,7 @@ class AnalyticsAgent:
                 "tool_calls": [],
                 "error": str(exc),
                 "traceback": tb.format_exc(),
+                "_messages": _err_msgs,
             }
 
     def get_session_info(self, session_id: str) -> dict:
