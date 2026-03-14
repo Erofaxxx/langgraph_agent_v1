@@ -31,7 +31,7 @@ def _get_router_llm() -> ChatOpenAI:
             model=ROUTER_MODEL,
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
-            max_tokens=256,
+            max_tokens=8000,
             temperature=0,
             default_headers={
                 "HTTP-Referer": "https://server.asktab.ru",
@@ -90,9 +90,14 @@ def classify(query: str) -> list[str]:
         llm = _get_router_llm()
         system_prompt = _build_router_prompt()
 
+        # Truncate query: classification only needs the first ~400 chars.
+        # Long multi-paragraph messages cause the model to answer content
+        # instead of returning JSON, potentially hitting the token limit.
+        routing_query = query[:400] + ("…" if len(query) > 400 else "")
+
         response = llm.invoke([
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query},
+            {"role": "user", "content": routing_query},
         ])
 
         raw = response.content if isinstance(response.content, str) else str(response.content)

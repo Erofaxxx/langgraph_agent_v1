@@ -121,13 +121,33 @@ class ClickHouseClient:
                     "nulls": null_count,
                 }
             else:
-                sample = [str(v) for v in non_null.value_counts().head(3).index.tolist()]
-                stats[col] = {
-                    "type": str(series.dtype),
-                    "unique": int(non_null.nunique()),
-                    "sample": sample,
-                    "nulls": null_count,
-                }
+                # Check if values are lists (ClickHouse Array columns → unhashable)
+                first_val = non_null.iloc[0] if len(non_null) else None
+                if isinstance(first_val, list):
+                    stats[col] = {
+                        "type": "Array",
+                        "avg_len": round(non_null.apply(len).mean(), 1) if len(non_null) else 0,
+                        "max_len": int(non_null.apply(len).max()) if len(non_null) else 0,
+                        "nulls": null_count,
+                    }
+                else:
+                    try:
+                        raw_sample = non_null.value_counts().head(3).index.tolist()
+                    except TypeError:
+                        # Fallback for any other unhashable types
+                        raw_sample = non_null.head(3).tolist()
+                    # Truncate each value to avoid huge strings (e.g. long joined-path strings)
+                    _MAX_SAMPLE_LEN = 150
+                    sample = [
+                        str(v)[:_MAX_SAMPLE_LEN] + ("…" if len(str(v)) > _MAX_SAMPLE_LEN else "")
+                        for v in raw_sample
+                    ]
+                    stats[col] = {
+                        "type": str(series.dtype),
+                        "unique": int(non_null.nunique()),
+                        "sample": sample,
+                        "nulls": null_count,
+                    }
         return stats
 
     def execute_query(self, sql: str, limit: int = 500000) -> dict:

@@ -11,6 +11,23 @@ import json
 import threading
 from typing import Optional
 
+# Maximum tool result size sent to the LLM.
+# Prevents context explosion when data contains unexpectedly large values.
+# ~20 000 chars ≈ 5 000 tokens — enough for any normal col_stats or analysis output.
+_MAX_RESULT_CHARS = 20_000
+
+
+def _cap_result(text: str) -> str:
+    """Truncate tool result to _MAX_RESULT_CHARS if needed."""
+    if len(text) <= _MAX_RESULT_CHARS:
+        return text
+    half = _MAX_RESULT_CHARS // 2
+    return (
+        text[:half]
+        + f"\n… [result truncated: {len(text)} chars total, showing first and last {half}] …\n"
+        + text[-half:]
+    )
+
 from langchain_core.tools import tool
 
 # ─── Lazy singletons ──────────────────────────────────────────────────────────
@@ -82,7 +99,7 @@ def clickhouse_query(sql: str) -> str:
     try:
         with _ch_lock:
             result = _get_ch_client().execute_query(sql)
-        return json.dumps(result, ensure_ascii=False, default=str)
+        return _cap_result(json.dumps(result, ensure_ascii=False, default=str))
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})
 
@@ -110,7 +127,7 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
     try:
         result = _get_sandbox().execute(code=code, parquet_path=parquet_path)
         plots: list[str] = result.pop("plots", [])
-        content = json.dumps(result, ensure_ascii=False, default=str)
+        content = _cap_result(json.dumps(result, ensure_ascii=False, default=str))
         return content, plots
     except Exception as exc:
         import traceback as tb

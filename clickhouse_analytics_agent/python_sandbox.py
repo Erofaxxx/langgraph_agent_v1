@@ -150,9 +150,20 @@ class PythonSandbox:
             elif result_value is not None:
                 result_value = str(result_value)
 
+            # ── Truncate stdout to avoid flooding LLM context ──────────────
+            _MAX_OUTPUT = 3000
+            raw_output = stdout_capture.getvalue()
+            if len(raw_output) > _MAX_OUTPUT:
+                half = _MAX_OUTPUT // 2
+                raw_output = (
+                    raw_output[:half]
+                    + f"\n… [stdout truncated: {len(raw_output)} chars total] …\n"
+                    + raw_output[-half:]
+                )
+
             return {
                 "success": True,
-                "output": stdout_capture.getvalue(),
+                "output": raw_output,
                 "result": result_value,
                 "plots": plots,
                 "error": None,
@@ -163,9 +174,10 @@ class PythonSandbox:
             # the actual error line and is sufficient for the LLM to self-correct.
             full_tb = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             error_text = full_tb[-1500:] if len(full_tb) > 1500 else full_tb
+            raw_output = stdout_capture.getvalue()
             return {
                 "success": False,
-                "output": stdout_capture.getvalue(),
+                "output": raw_output[:3000] if len(raw_output) > 3000 else raw_output,
                 "result": None,
                 "plots": plots,  # return any plots captured before the error
                 "error": error_text,
