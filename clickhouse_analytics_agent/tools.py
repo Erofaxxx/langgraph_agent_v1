@@ -109,7 +109,9 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
     Rules:
     1. Set `result` to a Markdown string (shown to the user).
     2. Use print() for intermediate logging.
-    3. All matplotlib figures are auto-captured as PNG.
+    3. All open matplotlib figures are auto-captured as PNG after your code runs.
+       NEVER call plt.savefig() or plt.close() — savefig saves to disk (not
+       returned to user), and close() destroys the figure before capture → blank.
     4. Label charts in Russian; format numbers with thousands separators.
     5. Handle missing data before calculations.
 

@@ -9,7 +9,7 @@ user-provided code in a controlled namespace. Captures:
 """
 
 import base64
-import contextlib
+import builtins as _builtins_module
 import io
 import traceback
 
@@ -40,6 +40,24 @@ except Exception:
 
 sns.set_style("whitegrid")
 sns.set_palette("husl")
+
+
+class _PlotProxy:
+    """
+    Proxy for matplotlib.pyplot injected into the agent's execution namespace.
+
+    Makes plt.close() and plt.savefig() silent no-ops so that agent code
+    cannot accidentally destroy figures before the sandbox captures them.
+    All other plt attributes/methods delegate transparently to the real plt.
+    This works even when the visualization skill is NOT loaded.
+    """
+    def __getattr__(self, name: str):
+        if name in ("close", "savefig"):
+            return lambda *a, **kw: None  # no-op — figure stays open for capture
+        return getattr(plt, name)
+
+
+_plt_proxy = _PlotProxy()
 
 
 class PythonSandbox:
@@ -115,8 +133,13 @@ class PythonSandbox:
                 )
                 array_cols.append(col)
 
-        # Close any stray figures from previous runs
-        plt.close("all")
+        # ── Snapshot existing figure numbers before exec ───────────────────
+        # matplotlib is a global singleton shared across all parallel calls.
+        # We record which figures exist BEFORE our exec, then after exec we
+        # capture and close only the NEW figures created by THIS call.
+        # This prevents parallel python_analysis calls from interfering with
+        # each other's figures via plt.close("all").
+        _before_fignums: set[int] = set(plt.get_fignums())
 
         # ── Prepare execution namespace ────────────────────────────────────
         # df_info shows dtype for regular cols and "Array" for list cols so
@@ -125,37 +148,52 @@ class PythonSandbox:
         for col in array_cols:
             df_info[col] = "Array"
 
+        # ── Thread-safe stdout capture ─────────────────────────────────────
+        # contextlib.redirect_stdout is NOT thread-safe: it sets sys.stdout
+        # globally, so two parallel calls overwrite each other's capture buffer.
+        # Instead, we inject a custom print() into the execution builtins that
+        # writes directly to our per-call StringIO — fully isolated.
+        stdout_capture = io.StringIO()
+
+        def _captured_print(*args, sep=" ", end="\n", file=None, flush=False):
+            _builtins_module.print(
+                *args, sep=sep, end=end,
+                file=stdout_capture if file is None else file,
+                flush=flush,
+            )
+
+        _patched_builtins = {**vars(_builtins_module), "print": _captured_print}
+
         local_vars = {
             "df": df,
             "pd": pd,
             "np": np,
-            "plt": plt,
+            "plt": _plt_proxy,   # proxy: close()/savefig() are no-ops
             "sns": sns,
             "result": None,  # agent sets this for final text output
             "df_info": df_info,
         }
 
-        stdout_capture = io.StringIO()
         plots: list[str] = []
 
         # Libraries are placed in globals so they remain accessible inside
         # user-defined lambdas called back by pandas/numpy (e.g. .apply()).
         # local_vars (df, result, df_info) take precedence over globals in exec.
         sandbox_globals = {
-            "__builtins__": __builtins__,
+            "__builtins__": _patched_builtins,
             "pd": pd,
             "np": np,
-            "plt": plt,
+            "plt": _plt_proxy,   # proxy: close()/savefig() are no-ops
             "sns": sns,
         }
 
         try:
-            # ── Execute code with captured stdout ──────────────────────────
-            with contextlib.redirect_stdout(stdout_capture):
-                exec(code, sandbox_globals, local_vars)  # noqa: S102
+            # ── Execute code ────────────────────────────────────────────────
+            exec(code, sandbox_globals, local_vars)  # noqa: S102
 
-            # ── Capture all matplotlib figures ─────────────────────────────
-            for fig_num in plt.get_fignums():
+            # ── Capture only figures created by THIS call ──────────────────
+            _my_fignums: set[int] = set(plt.get_fignums()) - _before_fignums
+            for fig_num in sorted(_my_fignums):
                 fig = plt.figure(fig_num)
                 buf = io.BytesIO()
                 fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
@@ -221,6 +259,12 @@ class PythonSandbox:
             }
 
         finally:
-            # Always clean up figures and local vars
-            plt.close("all")
+            # Close only figures created by THIS call, not figures from
+            # other parallel calls that may still be running.
+            _to_close = set(plt.get_fignums()) - _before_fignums
+            for fig_num in _to_close:
+                try:
+                    plt.close(fig_num)
+                except Exception:
+                    pass
             local_vars.clear()

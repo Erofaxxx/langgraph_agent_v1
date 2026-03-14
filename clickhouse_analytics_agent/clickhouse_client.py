@@ -124,10 +124,22 @@ class ClickHouseClient:
                 # Check if values are lists (ClickHouse Array columns → unhashable)
                 first_val = non_null.iloc[0] if len(non_null) else None
                 if isinstance(first_val, list):
+                    # Flatten first 10 rows to extract unique sample values so the
+                    # agent can see what's inside the array without needing python_analysis.
+                    flat: list[str] = []
+                    for lst in non_null.iloc[:10]:
+                        if isinstance(lst, list):
+                            flat.extend(str(v) for v in lst if v is not None and str(v).strip())
+                    # Deduplicate while preserving order, cap at 5 unique values
+                    seen: dict[str, None] = {}
+                    for v in flat:
+                        seen.setdefault(v, None)
+                    sample_vals = [v[:50] + "…" if len(v) > 50 else v for v in list(seen)[:5]]
                     stats[col] = {
                         "type": "Array",
                         "avg_len": round(non_null.apply(len).mean(), 1) if len(non_null) else 0,
                         "max_len": int(non_null.apply(len).max()) if len(non_null) else 0,
+                        "sample_values": sample_vals,
                         "nulls": null_count,
                     }
                 else:
