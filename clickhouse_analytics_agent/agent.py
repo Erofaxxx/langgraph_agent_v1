@@ -160,15 +160,33 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
     Compress a previous turn's internal tool-call chain while keeping the
     final agent answer intact.
 
-    Returns one of:
-      [HumanMessage, AIMessage(tool_summary), AIMessage(final_answer)]  — tools used
-      [HumanMessage, AIMessage(final_answer)]                           — no tools
-      [HumanMessage]                                                    — no answer yet
+    Strategy:
+      - All unique clickhouse_query calls are logged as compact one-liners:
+        "SQL: <first 120 chars> → N rows (col1, col2, …)"
+        Duplicate SQL (same query run twice) is shown once.
+      - python_analysis calls: only the final result line (success/error + preview).
+      - The final agent answer text is preserved verbatim.
+      - Max 20 log lines to prevent runaway growth on very long turns.
+
+    Returns:
+      [HumanMessage, AIMessage(tool_log), AIMessage(final_answer)]  — tools used
+      [HumanMessage, AIMessage(final_answer)]                       — no tools
+      [HumanMessage]                                                — no answer yet
     """
     human_msg: HumanMessage | None = None
-    sql_snippet = ""
-    row_info = ""
     final_ai_msg: AIMessage | None = None
+
+    # Build tool_call_id → ToolMessage index for O(1) result lookup
+    tool_results: dict[str, ToolMessage] = {}
+    for msg in turn_msgs:
+        if isinstance(msg, ToolMessage):
+            tc_id = getattr(msg, "tool_call_id", None)
+            if tc_id:
+                tool_results[tc_id] = msg
+
+    log_lines: list[str] = []
+    seen_sqls: set[str] = set()   # dedup identical queries
+    last_python_line: str = ""    # keep only the last python result
 
     for msg in turn_msgs:
         if isinstance(msg, HumanMessage):
@@ -176,11 +194,49 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
 
         elif isinstance(msg, AIMessage):
             for tc in getattr(msg, "tool_calls", []):
-                if tc.get("name") == "clickhouse_query" and not sql_snippet:
-                    sql = (tc.get("args") or {}).get("sql", "")
-                    if sql:
-                        sql_snippet = sql[:120] + ("…" if len(sql) > 120 else "")
+                name = tc.get("name", "")
+                args = tc.get("args") or {}
+                tc_id = tc.get("id", "")
+                tm = tool_results.get(tc_id)
 
+                if name == "clickhouse_query":
+                    sql = args.get("sql", "")
+                    sql_key = " ".join(sql.split())[:200]   # normalise whitespace for dedup
+                    if sql_key in seen_sqls:
+                        continue
+                    seen_sqls.add(sql_key)
+                    sql_short = sql.replace("\n", " ").strip()[:120]
+                    if len(sql) > 120:
+                        sql_short += "…"
+                    if tm:
+                        try:
+                            data = json.loads(tm.content)
+                            if data.get("success") is False:
+                                status = f"ERROR: {str(data.get('error', ''))[:60]}"
+                            else:
+                                rc = data.get("row_count", "?")
+                                cols = data.get("columns") or []
+                                col_str = ", ".join(str(c) for c in cols[:5])
+                                if len(cols) > 5:
+                                    col_str += f" +{len(cols) - 5}"
+                                status = f"{rc} rows ({col_str})"
+                        except Exception:
+                            status = "?"
+                    else:
+                        status = "pending"
+                    log_lines.append(f"SQL: {sql_short} → {status}")
+
+                elif name == "python_analysis":
+                    if tm:
+                        try:
+                            data = json.loads(tm.content)
+                            ok = "✓" if data.get("success") else "✗"
+                            preview = str(data.get("result") or data.get("error") or "")[:80]
+                            last_python_line = f"Python {ok}: {preview}"
+                        except Exception:
+                            last_python_line = "Python: ?"
+
+            # Capture last non-tool AIMessage as the final answer
             if not getattr(msg, "tool_calls", None):
                 content = msg.content
                 has_text = (isinstance(content, str) and content.strip()) or (
@@ -195,30 +251,16 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
                 if has_text:
                     final_ai_msg = msg
 
-        elif isinstance(msg, ToolMessage):
-            try:
-                data = json.loads(msg.content)
-                if (getattr(msg, "name", "") or "") == "clickhouse_query" and not row_info:
-                    rc = data.get("row_count")
-                    cols = data.get("columns") or []
-                    row_info = f"{rc} rows" if rc is not None else ""
-                    if cols:
-                        row_info += f", cols: {', '.join(str(c) for c in cols[:6])}"
-            except Exception:
-                pass
+    # Append last python result (if any) and cap total lines
+    if last_python_line:
+        log_lines.append(last_python_line)
+    log_lines = log_lines[:20]   # hard cap — safety valve
 
     result: list = []
     if human_msg is not None:
         result.append(human_msg)
-
-    tool_parts: list[str] = []
-    if sql_snippet:
-        tool_parts.append(f"SQL: {sql_snippet}")
-    if row_info:
-        tool_parts.append(row_info)
-    if tool_parts:
-        result.append(AIMessage(content=" | ".join(tool_parts)))
-
+    if log_lines:
+        result.append(AIMessage(content="\n".join(log_lines)))
     if final_ai_msg is not None:
         result.append(final_ai_msg)
 
