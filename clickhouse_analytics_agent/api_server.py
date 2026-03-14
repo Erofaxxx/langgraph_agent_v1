@@ -126,16 +126,29 @@ async def _run_agent_job(job_id: str) -> None:
         # Agent is already done and result is stored. Logger runs in a
         # daemon thread — any failure is silently swallowed, never affects agent.
         try:
+            import threading as _threading
+            from chat_logger import get_logger
+            from config import DB_PATH
+            logger = get_logger(DB_PATH)
+
             msgs = result.get("_messages", [])
             if msgs:
-                import threading as _threading
-                from chat_logger import get_logger
-                from config import DB_PATH
                 _threading.Thread(
-                    target=get_logger(DB_PATH).log_turn,
+                    target=logger.log_turn,
                     args=(job["session_id"], msgs, started_at),
-                    daemon=False,  # must complete even on server shutdown
+                    daemon=False,
                 ).start()
+
+            # Log router result (which skills Haiku selected for this turn)
+            active_skills = result.get("_active_skills", [])
+            from langchain_core.messages import HumanMessage as _HM
+            turn_index = sum(1 for m in msgs if isinstance(m, _HM))
+            _threading.Thread(
+                target=logger.log_router,
+                args=(job["session_id"], turn_index, active_skills,
+                      job.get("query", ""), started_at),
+                daemon=False,
+            ).start()
         except Exception as log_exc:
             print(f"[ChatLogger] init error (non-fatal): {log_exc}")
 

@@ -98,10 +98,33 @@ class PythonSandbox:
             except Exception:
                 pass
 
+        # ── Convert numpy-array columns to Python lists ────────────────────
+        # ClickHouse Array(X) columns survive parquet round-trip as numpy
+        # object-arrays. Standard pandas ops (to_markdown, tabulate) raise
+        # "truth value of an array is ambiguous" on them. Converting to plain
+        # Python lists makes the data fully compatible with all pandas/tabulate
+        # operations while preserving the values.
+        array_cols: list[str] = []
+        for col in df.columns:
+            non_null = df[col].dropna()
+            if len(non_null) == 0:
+                continue
+            if isinstance(non_null.iloc[0], np.ndarray):
+                df[col] = df[col].apply(
+                    lambda v: v.tolist() if isinstance(v, np.ndarray) else v
+                )
+                array_cols.append(col)
+
         # Close any stray figures from previous runs
         plt.close("all")
 
         # ── Prepare execution namespace ────────────────────────────────────
+        # df_info shows dtype for regular cols and "Array" for list cols so
+        # the agent knows to use .explode() / .apply(len) instead of to_markdown.
+        df_info = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        for col in array_cols:
+            df_info[col] = "Array"
+
         local_vars = {
             "df": df,
             "pd": pd,
@@ -109,8 +132,7 @@ class PythonSandbox:
             "plt": plt,
             "sns": sns,
             "result": None,  # agent sets this for final text output
-            # Compact type map for quick debugging: {"col": "int64", ...}
-            "df_info": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "df_info": df_info,
         }
 
         stdout_capture = io.StringIO()
