@@ -32,10 +32,9 @@ def _cap_result(text: str) -> str:
 
 from langchain_core.tools import tool
 
-# ─── Lazy singletons ──────────────────────────────────────────────────────────
+# ─── Lazy singleton (ClickHouse only) ─────────────────────────────────────────
 # Created on first use so config is loaded before connecting.
 _ch_client = None
-_sandbox = None
 
 # Serialise ClickHouse access: the client uses a single connection that does
 # not support concurrent queries. The lock prevents "Attempt to execute
@@ -50,14 +49,6 @@ def _get_ch_client():
         from clickhouse_client import ClickHouseClient
         _ch_client = ClickHouseClient()
     return _ch_client
-
-
-def _get_sandbox():
-    global _sandbox
-    if _sandbox is None:
-        from python_sandbox import PythonSandbox
-        _sandbox = PythonSandbox()
-    return _sandbox
 
 
 # ─── Tool 1: list_tables ──────────────────────────────────────────────────────
@@ -127,7 +118,8 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
         parquet_path: Returned by clickhouse_query.
     """
     try:
-        result = _get_sandbox().execute(code=code, parquet_path=parquet_path)
+        from python_sandbox import PythonSandbox
+        result = PythonSandbox().execute(code=code, parquet_path=parquet_path)
         plots: list[str] = result.pop("plots", [])
         content = _cap_result(json.dumps(result, ensure_ascii=False, default=str))
         return content, plots

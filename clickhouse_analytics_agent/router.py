@@ -74,8 +74,6 @@ def _build_router_prompt() -> str:
 - "Добрый день! Покажи топ кампаний и построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Какой ROAS у кампаний? Построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Когорты клиентов за 2024 год" → ["clickhouse_querying", "python_analysis", "cohort_analysis"]
-- "Привет" → []
-- "Как дела?" → []
 """
 
 
