@@ -78,28 +78,12 @@ class PythonSandbox:
                 "error": f"Failed to load parquet file '{parquet_path}': {exc}",
             }
 
-        # ── Normalise Array columns (numpy ndarray → Python list) ──────────
-        # ClickHouse Array(Int/Float) columns arrive as numpy ndarrays per cell.
-        # tabulate and many pandas ops break on ndarray cells (ValueError: ambiguous
-        # truth value). Convert to plain Python lists so they behave like Array(String).
-        for col in df.columns:
-            if df[col].dtype == object:
-                non_null = df[col].dropna()
-                if len(non_null) > 0 and isinstance(non_null.iloc[0], np.ndarray):
-                    df[col] = df[col].apply(
-                        lambda x: x.tolist() if isinstance(x, np.ndarray) else x
-                    )
-
         # ── Auto-coerce object columns to numeric or datetime ───────────────
         # ClickHouse can return Date/DateTime as strings or Decimal as objects.
         # This prevents common TypeErrors in agent-written Python code.
-        # Array columns (list values) are left as-is — they are already usable in Python.
         for col in list(df.select_dtypes(include="object").columns):
             non_null = df[col].dropna()
             if len(non_null) == 0:
-                continue
-            # Skip Array columns (list or ndarray values) — no coercion needed
-            if isinstance(non_null.iloc[0], (list, np.ndarray)):
                 continue
             # Try numeric conversion first
             converted = pd.to_numeric(df[col], errors="coerce")
@@ -125,17 +109,8 @@ class PythonSandbox:
             "plt": plt,
             "sns": sns,
             "result": None,  # agent sets this for final text output
-            # Type map with Array detection: {"col": "int64"} or {"col": "Array(object)"}
-            "df_info": {
-                col: (
-                    "Array(object)"
-                    if str(dtype) == "object"
-                    and len(df[col].dropna()) > 0
-                    and isinstance(df[col].dropna().iloc[0], (list, np.ndarray))
-                    else str(dtype)
-                )
-                for col, dtype in df.dtypes.items()
-            },
+            # Compact type map for quick debugging: {"col": "int64", ...}
+            "df_info": {col: str(dtype) for col, dtype in df.dtypes.items()},
         }
 
         stdout_capture = io.StringIO()
