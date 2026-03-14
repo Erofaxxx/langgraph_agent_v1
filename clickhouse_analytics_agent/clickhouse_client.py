@@ -122,9 +122,10 @@ class ClickHouseClient:
                     "nulls": null_count,
                 }
             else:
-                # Detect Array columns: check if any of the first values is a Python list
+                # Detect Array columns: Python list OR numpy ndarray per cell
+                # (ClickHouse Array(String) → list, Array(Int/Float) → ndarray)
                 first_val = non_null.iloc[0] if len(non_null) > 0 else None
-                if isinstance(first_val, list):
+                if isinstance(first_val, (list, np.ndarray)):
                     lengths = non_null.apply(len)
                     # Collect unique elements from the first 200 rows to keep it cheap
                     sample_rows = non_null.iloc[:200]

@@ -31,7 +31,7 @@ def _get_router_llm() -> ChatOpenAI:
             model=ROUTER_MODEL,
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0,
             default_headers={
                 "HTTP-Referer": "https://server.asktab.ru",
@@ -50,26 +50,25 @@ def _build_router_prompt() -> str:
         f'- "{name}": {info["router_hint"]}'
         for name, info in SKILLS.items()
     )
-    return f"""Ты — классификатор запросов аналитического агента. Твоя задача — определить, какие skills нужны для ответа на запрос пользователя.
+    return f"""Ты — классификатор запросов. Выбери нужные skills из списка ниже.
 
-Доступные skills и когда их активировать:
+ФОРМАТ ОТВЕТА: начни НЕМЕДЛЕННО с символа `[`. Никакого текста до массива. Никаких объяснений после. Только JSON-массив на одной строке.
+
+Доступные skills:
 {skill_list}
 
-Правила:
-- Верни JSON-массив с именами нужных skills: ["skill1", "skill2"]
-- Если запрос требует данных из ClickHouse → обязательно включи "clickhouse_querying"
-- Если запрос требует вычислений/анализа → обязательно включи "python_analysis"
-- Если запрос про график/визуализацию → включи "visualization"
-- Для аналитических вопросов без явного графика включи и "clickhouse_querying" и "python_analysis"
-- Если запрос не требует данных (приветствие, общий вопрос) → верни []
-- Не добавляй skills которые явно не нужны
-- Отвечай ТОЛЬКО валидным JSON-массивом без объяснений
+Правила выбора:
+- Нужны данные из ClickHouse → включи "clickhouse_querying"
+- Нужен анализ/расчёты → включи "python_analysis"
+- Нужен график → включи "visualization"
+- Приветствие или общий вопрос без данных → []
+- Включай только явно нужные skills
 
-Примеры:
-- "Сколько визитов за прошлый месяц?" → ["clickhouse_querying"]
-- "Какой ROAS у кампаний? Построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
-- "Когорты клиентов за 2024 год" → ["clickhouse_querying", "python_analysis", "cohort_analysis"]
-- "Привет" → []
+Примеры (запрос → ответ):
+"Сколько визитов?" → ["clickhouse_querying"]
+"ROAS кампаний, построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
+"Когорты клиентов" → ["clickhouse_querying", "python_analysis", "cohort_analysis"]
+"Привет" → []
 """
 
 
