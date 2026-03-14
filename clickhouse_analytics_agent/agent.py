@@ -164,7 +164,9 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
       - All unique clickhouse_query calls are logged as compact one-liners:
         "SQL: <first 120 chars> → N rows (col1, col2, …)"
         Duplicate SQL (same query run twice) is shown once.
-      - python_analysis calls: only the final result line (success/error + preview).
+      - All unique python_analysis calls are logged as one-liners:
+        "Python ✓/✗: <first 150 chars of result>"
+        Duplicate code (same snippet run twice) is shown once.
       - The final agent answer text is preserved verbatim.
       - Max 20 log lines to prevent runaway growth on very long turns.
 
@@ -185,8 +187,8 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
                 tool_results[tc_id] = msg
 
     log_lines: list[str] = []
-    seen_sqls: set[str] = set()   # dedup identical queries
-    last_python_line: str = ""    # keep only the last python result
+    seen_sqls: set[str] = set()    # dedup identical SQL queries
+    seen_py_codes: set[str] = set()  # dedup identical python snippets
 
     for msg in turn_msgs:
         if isinstance(msg, HumanMessage):
@@ -227,14 +229,19 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
                     log_lines.append(f"SQL: {sql_short} → {status}")
 
                 elif name == "python_analysis":
+                    code = args.get("code", "")
+                    code_key = " ".join(code.split())[:200]
+                    if code_key in seen_py_codes:
+                        continue
+                    seen_py_codes.add(code_key)
                     if tm:
                         try:
                             data = json.loads(tm.content)
                             ok = "✓" if data.get("success") else "✗"
-                            preview = str(data.get("result") or data.get("error") or "")[:80]
-                            last_python_line = f"Python {ok}: {preview}"
+                            preview = str(data.get("result") or data.get("error") or "")[:150]
+                            log_lines.append(f"Python {ok}: {preview}")
                         except Exception:
-                            last_python_line = "Python: ?"
+                            log_lines.append("Python: ?")
 
             # Capture last non-tool AIMessage as the final answer
             if not getattr(msg, "tool_calls", None):
@@ -251,9 +258,6 @@ def _summarize_previous_turn(turn_msgs: list) -> list:
                 if has_text:
                     final_ai_msg = msg
 
-    # Append last python result (if any) and cap total lines
-    if last_python_line:
-        log_lines.append(last_python_line)
     log_lines = log_lines[:20]   # hard cap — safety valve
 
     result: list = []
