@@ -19,6 +19,40 @@ from langchain_openai import ChatOpenAI
 from config import OPENROUTER_API_KEY, ROUTER_MODEL
 from skills._registry import SKILLS
 
+# Greeting words that can safely be stripped from the start of a query
+# before routing. Stripping prevents the LLM from classifying the whole
+# message as a greeting when the real content follows after the first line.
+_GREETING_RE = re.compile(
+    r"^(привет|hello|hi|добрый\s+день|добрый\s+вечер|доброе\s+утро|"
+    r"здравствуй(те)?|салют|hey|хай|ку)[!.,\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_greeting_prefix(query: str) -> str:
+    """
+    Remove leading greeting-only lines/paragraphs before routing.
+
+    Example:
+        "Привет\\n\\n1. Схема таблицы X?" → "1. Схема таблицы X?"
+        "Hello\\n\\nПокажи выручку"       → "Покажи выручку"
+        "Привет, покажи данные"            → unchanged (greeting + content in one line)
+    """
+    lines = query.strip().splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:          # skip empty lines at the top
+            i += 1
+        elif _GREETING_RE.match(line):  # pure greeting line — skip it
+            i += 1
+        else:
+            break
+    if i == 0:
+        return query  # nothing stripped
+    rest = "\n".join(lines[i:]).strip()
+    return rest if rest else query  # never return empty string
+
 # ─── Ленивый синглтон роутера ─────────────────────────────────────────────────
 _router_llm: Optional[ChatOpenAI] = None
 _router_llm_model: Optional[str] = None  # track which model is cached
@@ -60,20 +94,25 @@ def _build_router_prompt() -> str:
 Правила:
 - Верни JSON-массив с именами нужных skills: ["skill1", "skill2"]
 - Если запрос требует данных из ClickHouse → обязательно включи "clickhouse_querying"
-- Если запрос требует вычислений/анализа → обязательно включи "python_analysis"
-- Если запрос про график/визуализацию → включи "visualization"
-- Для аналитических вопросов без явного графика включи и "clickhouse_querying" и "python_analysis"
-- Верни [] ТОЛЬКО если сообщение целиком состоит из приветствия или светской болтовни БЕЗ каких-либо вопросов про данные.
-  Приветствие в НАЧАЛЕ сообщения ("привет", "hello", "добрый день") не делает весь запрос приветствием — классифицируй по содержанию вопроса, а не по первому слову.
-- Не добавляй skills которые явно не нужны
+- Если запрос требует вычислений, агрегации или сравнения чисел → включи "python_analysis"
+- Если запрос явно просит график или визуализацию → включи "visualization"
+- Если тема запроса совпадает с доменом конкретного skill (кампании, когорты, аномалии и т.д.) — добавь его
+- Не добавляй "python_analysis" если запрос — простое "покажи данные" или "сколько X", без вычислений
+- [] верни ТОЛЬКО если сообщение содержит ИСКЛЮЧИТЕЛЬНО приветствие или болтовню — ни одного вопроса о данных, таблицах, метриках или бизнесе
 - Отвечай ТОЛЬКО валидным JSON-массивом, без пояснений, без markdown-обёртки
 
 Примеры:
 - "Сколько визитов за прошлый месяц?" → ["clickhouse_querying"]
+- "Покажи схему таблицы dm_conversion_paths" → ["clickhouse_querying"]
+- "Схема dm_conversion_paths и есть ли spend в dm_campaigns?" → ["clickhouse_querying", "campaign_analysis"]
+- "1. Схема таблицы X?\n2. Есть ли колонка Y?\n3. Какие UTM?" → ["clickhouse_querying"]
 - "Привет, какая выручка за вчера?" → ["clickhouse_querying"]
 - "Добрый день! Покажи топ кампаний и построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Какой ROAS у кампаний? Построй график" → ["clickhouse_querying", "python_analysis", "visualization", "campaign_analysis"]
 - "Когорты клиентов за 2024 год" → ["clickhouse_querying", "python_analysis", "cohort_analysis"]
+- "Посчитай средний чек и динамику по месяцам" → ["clickhouse_querying", "python_analysis"]
+- "Привет" → []
+- "Как дела?" → []
 """
 
 
@@ -94,9 +133,13 @@ def classify(query: str) -> list[str]:
         llm = _get_router_llm()
         system_prompt = _build_router_prompt()
 
+        # Strip leading greeting-only lines so the LLM sees the real content.
+        # E.g. "Привет\n\n1. Схема таблицы?" → "1. Схема таблицы?"
+        routing_query = _strip_greeting_prefix(query)
+
         response = llm.invoke([
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query},
+            {"role": "user", "content": routing_query},
         ])
 
         raw = response.content if isinstance(response.content, str) else str(response.content)
