@@ -449,12 +449,29 @@ class AnalyticsAgent:
                 if isinstance(m, ToolMessage)
                 and (getattr(m, "name", "") or "") == "python_analysis"
             }
+            # For parallel tool calls: the LLM fires clickhouse_query x N in one shot.
+            # All N results arrive before any AIMessage, so "already seen" logic misses them.
+            # Fix: among "unseen" clickhouse_query results keep only the FIRST with full
+            # col_stats; compress the rest (they keep columns + parquet_path so the LLM
+            # can still reference the data).
+            unseen_ch_indices = [
+                i for i, m in enumerate(current_msgs)
+                if isinstance(m, ToolMessage)
+                and (getattr(m, "name", "") or "") == "clickhouse_query"
+                and not any(j > i for j in ai_positions)
+            ]
+            compress_parallel_ch: set[int] = set(unseen_ch_indices[1:])
+
             compressed_current: list = []
             for i, msg in enumerate(current_msgs):
                 name = (getattr(msg, "name", "") or "") if isinstance(msg, ToolMessage) else ""
-                if isinstance(msg, ToolMessage) and name == "clickhouse_query" and any(j > i for j in ai_positions):
-                    # LLM already saw col_stats → strip it for subsequent calls
-                    compressed_current.append(_compress_tool_message(msg))
+                if isinstance(msg, ToolMessage) and name == "clickhouse_query":
+                    already_seen = any(j > i for j in ai_positions)
+                    if already_seen or i in compress_parallel_ch:
+                        # LLM already saw col_stats, or parallel duplicate — strip col_stats
+                        compressed_current.append(_compress_tool_message(msg))
+                    else:
+                        compressed_current.append(msg)
                 elif isinstance(msg, ToolMessage) and name == "python_analysis" and any(j > i for j in py_positions):
                     compressed_current.append(_compress_tool_message(msg))
                 else:
