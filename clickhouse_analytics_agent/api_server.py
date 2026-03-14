@@ -134,7 +134,7 @@ async def _run_agent_job(job_id: str) -> None:
                 _threading.Thread(
                     target=get_logger(DB_PATH).log_turn,
                     args=(job["session_id"], msgs, started_at),
-                    daemon=True,
+                    daemon=False,  # must complete even on server shutdown
                 ).start()
         except Exception as log_exc:
             print(f"[ChatLogger] init error (non-fatal): {log_exc}")
