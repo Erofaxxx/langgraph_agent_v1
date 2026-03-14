@@ -31,7 +31,7 @@ def _get_router_llm() -> ChatOpenAI:
             model=ROUTER_MODEL,
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
-            max_tokens=256,
+            max_tokens=512,
             temperature=0,
             default_headers={
                 "HTTP-Referer": "https://server.asktab.ru",

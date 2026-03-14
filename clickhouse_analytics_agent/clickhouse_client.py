@@ -76,10 +76,10 @@ class ClickHouseClient:
         Result: [{"table": "visits", "columns": [{"name": "date", "type": "Date"}, ...]}, ...]
         """
         result = self.client.query(
-            "SELECT table, name, type "
-            "FROM system.columns "
-            "WHERE database = currentDatabase() "
-            "ORDER BY table, position"
+            "SELECT table_name, column_name, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_schema = database() "
+            "ORDER BY table_name, ordinal_position"
         )
         tables: dict[str, list] = {}
         for row in result.result_rows:
@@ -96,6 +96,7 @@ class ClickHouseClient:
 
         For numeric columns: {type, min, max, nulls}
         For datetime columns: {type, min, max, nulls}
+        For Array columns (list values): {type="Array", avg_len, max_len, sample_elements: [top-5 unique], nulls}
         For other (string/categorical): {type, unique, sample: [top-3], nulls}
 
         This is smaller in tokens than 5 preview rows and more useful for writing Python.
@@ -121,13 +122,31 @@ class ClickHouseClient:
                     "nulls": null_count,
                 }
             else:
-                sample = [str(v) for v in non_null.value_counts().head(3).index.tolist()]
-                stats[col] = {
-                    "type": str(series.dtype),
-                    "unique": int(non_null.nunique()),
-                    "sample": sample,
-                    "nulls": null_count,
-                }
+                # Detect Array columns: check if any of the first values is a Python list
+                first_val = non_null.iloc[0] if len(non_null) > 0 else None
+                if isinstance(first_val, list):
+                    lengths = non_null.apply(len)
+                    # Collect unique elements from the first 200 rows to keep it cheap
+                    sample_rows = non_null.iloc[:200]
+                    all_elems: list = []
+                    for arr in sample_rows:
+                        all_elems.extend(str(e) for e in arr if e is not None)
+                    unique_elems = list(dict.fromkeys(all_elems))[:5]  # top-5 preserving order
+                    stats[col] = {
+                        "type": "Array",
+                        "avg_len": round(float(lengths.mean()), 1) if len(lengths) else 0,
+                        "max_len": int(lengths.max()) if len(lengths) else 0,
+                        "sample_elements": unique_elems,
+                        "nulls": null_count,
+                    }
+                else:
+                    sample = [str(v) for v in non_null.value_counts().head(3).index.tolist()]
+                    stats[col] = {
+                        "type": str(series.dtype),
+                        "unique": int(non_null.nunique()),
+                        "sample": sample,
+                        "nulls": null_count,
+                    }
         return stats
 
     def execute_query(self, sql: str, limit: int = 500000) -> dict:
