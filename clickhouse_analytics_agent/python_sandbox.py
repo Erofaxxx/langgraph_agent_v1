@@ -115,8 +115,13 @@ class PythonSandbox:
                 )
                 array_cols.append(col)
 
-        # Close any stray figures from previous runs
-        plt.close("all")
+        # ── Snapshot existing figure numbers before exec ───────────────────
+        # matplotlib is a global singleton shared across all parallel calls.
+        # We record which figures exist BEFORE our exec, then after exec we
+        # capture and close only the NEW figures created by THIS call.
+        # This prevents parallel python_analysis calls from interfering with
+        # each other's figures via plt.close("all").
+        _before_fignums: set[int] = set(plt.get_fignums())
 
         # ── Prepare execution namespace ────────────────────────────────────
         # df_info shows dtype for regular cols and "Array" for list cols so
@@ -154,8 +159,9 @@ class PythonSandbox:
             with contextlib.redirect_stdout(stdout_capture):
                 exec(code, sandbox_globals, local_vars)  # noqa: S102
 
-            # ── Capture all matplotlib figures ─────────────────────────────
-            for fig_num in plt.get_fignums():
+            # ── Capture only figures created by THIS call ──────────────────
+            _my_fignums: set[int] = set(plt.get_fignums()) - _before_fignums
+            for fig_num in sorted(_my_fignums):
                 fig = plt.figure(fig_num)
                 buf = io.BytesIO()
                 fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
@@ -221,6 +227,12 @@ class PythonSandbox:
             }
 
         finally:
-            # Always clean up figures and local vars
-            plt.close("all")
+            # Close only figures created by THIS call, not figures from
+            # other parallel calls that may still be running.
+            _to_close = set(plt.get_fignums()) - _before_fignums
+            for fig_num in _to_close:
+                try:
+                    plt.close(fig_num)
+                except Exception:
+                    pass
             local_vars.clear()
