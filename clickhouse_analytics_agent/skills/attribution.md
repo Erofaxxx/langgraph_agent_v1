@@ -1,0 +1,337 @@
+# Скилл: Data-Driven Атрибуция
+
+Активируется при запросах про: **атрибуция**, вклад канала, data-driven атрибуция, Markov, Shapley,
+linear attribution, u-shaped, time decay, позиционная атрибуция, какой канал важнее, куда вкладывать
+бюджет, customer journey attribution, какие каналы закрывают сделку, какие каналы открывают,
+removal effect, attribution credit, мультиканальная атрибуция.
+
+---
+
+## Доступные модели
+
+| Модель | Витрина | Когда использовать |
+|--------|---------|-------------------|
+| Last Touch / First Touch | `dm_orders` | Быстрое сравнение; описано в campaign_analysis |
+| Linear | `dm_conversion_paths` | Равное распределение — базовый бенчмарк |
+| U-Shaped (Position-Based) | `dm_conversion_paths` | Когда важен и вход, и закрытие |
+| Time Decay | `dm_conversion_paths` | Акцент на ближних к покупке касаниях |
+| **Markov Chain** | `dm_conversion_paths` | **Основная data-driven модель** — честный вклад каждого канала |
+
+**Spend-данных нет** → CPA и ROAS недоступны.
+Результат атрибуции — **attribution credit**: доля выручки, приписываемая каналу.
+
+---
+
+## Данные dm_conversion_paths
+
+- **4 520** конвертировавших клиентов (`converted = 1`)
+- **379 043** неконвертировавших (`converted = 0`) — нужны для Markov
+- `channels_path`: 7 значений — `organic`, `ad`, `direct`, `internal`, `referral`, `messenger`, `social`
+- `sources_path`: utm_source — `ya-direct`, `gdeslon`, `yandexsmartcamera`, `cityads`, `""` (organic/direct)
+- Пустых массивов нет — данных достаточно для всех моделей
+
+**Правило выбора колонки:**
+- Стратегический вопрос ("какие каналы важнее") → `channels_path`
+- Тактический вопрос ("какой источник/кампания") → `sources_path` / `campaigns_path`
+- Пустую строку `""` в sources_path считать каналом `organic/direct`, не удалять
+
+---
+
+## Шаг 1 — SQL-выгрузка
+
+### Для Linear / U-Shape / Time Decay (все конвертировавшие)
+
+```sql
+SELECT
+    client_id,
+    converted,
+    revenue,
+    path_length,
+    channels_path,
+    days_from_first_path
+FROM dm_conversion_paths
+WHERE converted = 1
+```
+
+### Для Markov Chain (нужны и 0, и 1 — выборка неконвертировавших)
+
+```sql
+-- Все converted=1 + ~30K случайных converted=0
+SELECT
+    client_id,
+    converted,
+    revenue,
+    channels_path
+FROM dm_conversion_paths
+WHERE converted = 1
+   OR (converted = 0 AND rand() % 13 = 0)
+```
+
+> Выборка 1/13 от 379K ≈ 29K строк. Итого ~34K строк — достаточно для надёжного Markov, время расчёта < 30 сек.
+
+### Для атрибуции по источникам (utm_source)
+
+```sql
+SELECT
+    client_id,
+    converted,
+    revenue,
+    channels_path,
+    sources_path,
+    days_from_first_path
+FROM dm_conversion_paths
+WHERE converted = 1
+```
+
+---
+
+## Шаг 2 — Python-код для python_analysis
+
+> `df` уже загружен. Всегда устанавливать переменную `result`.
+
+---
+
+### Алгоритм: Linear Attribution
+
+```python
+from collections import defaultdict
+
+credits = defaultdict(float)
+total_revenue = 0.0
+
+for _, row in df[df['converted'] == 1].iterrows():
+    path = list(row['channels_path'])
+    rev = float(row['revenue']) if row['revenue'] else 0.0
+    if not path or rev == 0:
+        continue
+    w = rev / len(path)
+    for ch in path:
+        credits[ch] += w
+    total_revenue += rev
+
+print(f"Конверсий: {len(df[df['converted']==1])}, Выручка: {total_revenue:,.0f}")
+
+total_credit = sum(credits.values())
+rows = []
+for ch, credit in sorted(credits.items(), key=lambda x: -x[1]):
+    rows.append(f"| {ch} | {credit:,.0f} ₽ | {credit / total_credit:.1%} |")
+
+result = "## Linear Attribution — вклад каналов\n\n"
+result += "| Канал | Attributed Revenue | Доля |\n|---|---|---|\n"
+result += "\n".join(rows)
+result += f"\n\nПокрытие: {len(df[df['converted']==1]):,} конверсий, {total_revenue:,.0f} ₽"
+```
+
+---
+
+### Алгоритм: U-Shaped (Position-Based) Attribution
+
+```python
+from collections import defaultdict
+
+credits = defaultdict(float)
+
+for _, row in df[df['converted'] == 1].iterrows():
+    path = list(row['channels_path'])
+    rev = float(row['revenue']) if row['revenue'] else 0.0
+    n = len(path)
+    if not path or rev == 0:
+        continue
+    if n == 1:
+        credits[path[0]] += rev
+    elif n == 2:
+        credits[path[0]] += rev * 0.5
+        credits[path[1]] += rev * 0.5
+    else:
+        credits[path[0]] += rev * 0.4     # first touch
+        credits[path[-1]] += rev * 0.4    # last touch
+        mid_w = 0.2 / (n - 2)
+        for ch in path[1:-1]:
+            credits[ch] += mid_w * rev
+
+total = sum(credits.values())
+rows = []
+for ch, credit in sorted(credits.items(), key=lambda x: -x[1]):
+    rows.append(f"| {ch} | {credit:,.0f} ₽ | {credit / total:.1%} |")
+
+result = "## U-Shaped Attribution — вклад каналов\n\n"
+result += "| Канал | Attributed Revenue | Доля |\n|---|---|---|\n"
+result += "\n".join(rows)
+```
+
+---
+
+### Алгоритм: Time Decay Attribution
+
+```python
+import numpy as np
+from collections import defaultdict
+
+credits = defaultdict(float)
+
+for _, row in df[df['converted'] == 1].iterrows():
+    path = list(row['channels_path'])
+    days = list(row['days_from_first_path'])
+    rev = float(row['revenue']) if row['revenue'] else 0.0
+    if not path or rev == 0:
+        continue
+    max_day = max(days) if days else len(path) - 1
+    # Экспоненциальный decay: ближние к конверсии получают больший вес
+    raw_w = np.array([np.exp(-0.5 * (max_day - d)) for d in days], dtype=float)
+    if raw_w.sum() == 0:
+        raw_w = np.ones(len(path))
+    norm_w = raw_w / raw_w.sum()
+    for ch, w in zip(path, norm_w):
+        credits[ch] += w * rev
+
+total = sum(credits.values())
+rows = []
+for ch, credit in sorted(credits.items(), key=lambda x: -x[1]):
+    rows.append(f"| {ch} | {credit:,.0f} ₽ | {credit / total:.1%} |")
+
+result = "## Time Decay Attribution — вклад каналов\n\n"
+result += "| Канал | Attributed Revenue | Доля |\n|---|---|---|\n"
+result += "\n".join(rows)
+```
+
+---
+
+### Алгоритм: Markov Chain Attribution (основной data-driven)
+
+> Использовать выборочную SQL-выгрузку выше (~34K строк). Расчёт на 383K строках — медленно.
+
+```python
+import numpy as np
+from collections import defaultdict
+
+START, CONV, NULL = '(start)', '(conversion)', '(null)'
+
+print(f"Строк: {len(df):,} | Конверсий: {df['converted'].sum():,}")
+
+# 1. Строим пути с терминальными состояниями
+paths = []
+for _, row in df.iterrows():
+    ch = list(row['channels_path'])
+    if not ch:
+        continue
+    terminal = CONV if row['converted'] == 1 else NULL
+    paths.append([START] + ch + [terminal])
+
+print(f"Путей собрано: {len(paths):,}")
+
+# 2. Подсчёт переходов
+trans_counts = defaultdict(lambda: defaultdict(int))
+for path in paths:
+    for a, b in zip(path[:-1], path[1:]):
+        trans_counts[a][b] += 1
+
+# 3. Матрица переходов
+states = sorted({s for path in paths for s in path})
+idx = {s: i for i, s in enumerate(states)}
+n = len(states)
+
+T = np.zeros((n, n))
+for fr, to_dict in trans_counts.items():
+    total = sum(to_dict.values())
+    for to, cnt in to_dict.items():
+        T[idx[fr]][idx[to]] = cnt / total
+
+# Поглощающие состояния
+for absorbing in [CONV, NULL]:
+    if absorbing in idx:
+        T[idx[absorbing]] = 0.0
+        T[idx[absorbing]][idx[absorbing]] = 1.0
+
+def conv_prob(matrix):
+    """Вероятность достичь (conversion) из (start) за 100 шагов."""
+    Tp = np.linalg.matrix_power(matrix, 100)
+    return float(Tp[idx[START], idx[CONV]])
+
+base_p = conv_prob(T)
+print(f"Базовая вероятность конверсии: {base_p:.4f}")
+
+# 4. Removal effect: убираем канал → считаем падение вероятности
+channels = [s for s in states if s not in (START, CONV, NULL)]
+removal = {}
+for ch in channels:
+    T_rem = T.copy()
+    ci, ni = idx[ch], idx[NULL]
+    for i in range(n):
+        if T_rem[i][ci] > 0:
+            T_rem[i][ni] += T_rem[i][ci]
+            T_rem[i][ci] = 0.0
+    removal[ch] = max(0.0, base_p - conv_prob(T_rem))
+
+# 5. Attribution credits
+total_removal = sum(removal.values())
+total_revenue = float(df[df['converted'] == 1]['revenue'].sum())
+
+if total_removal == 0:
+    result = "⚠️ Markov: нулевые removal effects — недостаточно данных."
+else:
+    rows = []
+    for ch in sorted(removal, key=lambda x: -removal[x]):
+        share = removal[ch] / total_removal
+        attr_rev = share * total_revenue
+        re_pct = removal[ch] / base_p * 100
+        rows.append(f"| {ch} | {re_pct:.1f}% | {share:.1%} | {attr_rev:,.0f} ₽ |")
+
+    result = "## Markov Chain Attribution\n\n"
+    result += "| Канал | Removal Effect | Attribution Share | Attributed Revenue |\n"
+    result += "|---|---|---|---|\n"
+    result += "\n".join(rows)
+    result += (
+        f"\n\n**Removal Effect** — на сколько падает вероятность конверсии при удалении канала из всех путей.\n"
+        f"База: {base_p:.4f} | Конверсий: {df['converted'].sum():,} | Путей: {len(paths):,}"
+    )
+```
+
+---
+
+## Сравнительная таблица моделей
+
+После расчёта нескольких моделей — собрать attribution share в одну таблицу:
+
+```python
+# models = {'Linear': {'organic': 0.35, 'ad': 0.28, ...},
+#            'U-Shaped': {...}, 'Markov': {...}}
+
+channels_all = sorted({ch for m in models.values() for ch in m})
+model_names = list(models.keys())
+header = "| Канал | " + " | ".join(model_names) + " |"
+sep = "|---|" + "---|" * len(model_names)
+rows = [header, sep]
+for ch in channels_all:
+    vals = [f"{models[m].get(ch, 0):.1%}" for m in model_names]
+    rows.append(f"| {ch} | " + " | ".join(vals) + " |")
+
+result = "## Сравнение моделей атрибуции\n\n" + "\n".join(rows)
+```
+
+---
+
+## Рекомендации по бюджету (без spend-данных)
+
+Spend в ClickHouse **отсутствует** — точный ROAS недоступен.
+Если пользователь просит бюджетные рекомендации:
+
+1. **Дать attribution share** по каналам из Markov
+2. **Объяснить**: "Для точного ROAS нужны расходы из Яндекс Директа — подключи данные о spend"
+3. **Дать качественный вывод без домыслов:**
+
+| Ситуация | Вывод |
+|----------|-------|
+| Высокий Markov + низкий Last Touch | Канал важен стратегически, недооценён в last-touch отчётах |
+| Высокий Last Touch + низкий Markov | "Закрыватель" — без него сделка не состоится, но сам не генерирует спрос |
+| Высокий First Touch + низкий Markov | "Охватный" канал — инициирует спрос, но не решает исход |
+| Расхождение между моделями > 2× | Сигнал: канал либо сильно недооценён, либо переоценён в простых моделях |
+
+---
+
+## Правила интерпретации
+
+- **n < 100 конверсий в сегменте** → не строить Markov, использовать Linear или U-Shaped
+- **Removal effect < 1% от base_p** → канал статистически незначим, отметить ⚠️
+- **dm_conversion_paths ≠ все клиенты** — только клиенты с отслеживаемым journey; анонимные не входят
+- **sources_path содержит `""`** — это organic/direct, не удалять из путей, считать отдельным каналом
+- Всегда указывать: покрытие (сколько конверсий попало в модель) и суммарная выручка в модели
