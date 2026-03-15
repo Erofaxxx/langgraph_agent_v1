@@ -143,21 +143,22 @@ def classify(query: str, context: list[dict] | None = None) -> list[str]:
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
-        # Inject recent conversation history so the router understands
-        # context-dependent replies like "да", "продолжи", "покажи ещё".
-        # Truncation strategy: keep first 200 chars (topic/intent) +
-        # last 3 non-empty lines (where agent questions usually appear).
-        # This way "да" after "Продолжить анализ кампаний?" is understood
-        # even when the full answer is several KB long.
+        # Inject conversation history so the router understands context-dependent
+        # replies like "да", "продолжи", "покажи ещё".
+        #
+        # Truncation rules (applied only here, main agent is unaffected):
+        #   user messages      — passed through fully (no truncation)
+        #   assistant messages — first 400 chars (topic) + last 5 non-empty lines
+        #                        (where the agent's closing question usually sits)
         if context:
             for msg in context:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
                 if not content:
                     continue
-                if len(content) > 400:
-                    head = content[:200]
-                    tail_lines = [l for l in content.splitlines() if l.strip()][-3:]
+                if role == "assistant" and len(content) > 400:
+                    head = content[:400]
+                    tail_lines = [l for l in content.splitlines() if l.strip()][-5:]
                     tail = "\n".join(tail_lines)
                     content = head + "\n…\n" + tail
                 messages.append({"role": role, "content": content})

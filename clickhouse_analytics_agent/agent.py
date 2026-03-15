@@ -706,7 +706,11 @@ class AnalyticsAgent:
         Updates active_skills and skill_instructions in the state.
 
         To handle context-dependent replies ("да", "продолжи", "ещё раз"),
-        we pass the last few exchanges to the router so it can infer intent.
+        we pass selected prior messages to the router so it can infer intent.
+
+        Selection rules (applied independently to user and assistant messages):
+          - user messages   : 1st ever + last 3, full content (no truncation)
+          - assistant messages: 1st ever + last 3, truncated in router
         """
         messages = state.get("messages", [])
         last_human = next(
@@ -725,33 +729,50 @@ class AnalyticsAgent:
                 if isinstance(b, dict) and b.get("type") == "text"
             )
 
-        # ── Build routing context from recent history ──────────────────────
-        # Include the last 3 exchanges (human + assistant) before the current
-        # message so the router understands replies like "да", "продолжи".
-        # We stop before the last HumanMessage (it is `query_text` itself).
-        _CONTEXT_TURNS = 3
-        context: list[dict] = []
-        # Walk backwards through messages before the last human message
-        prior_messages = list(messages)
+        # ── Build routing context from full history ────────────────────────
+        # Find all prior human/assistant messages before the current turn.
         last_human_idx = next(
-            (i for i in range(len(prior_messages) - 1, -1, -1)
-             if isinstance(prior_messages[i], HumanMessage)),
+            (i for i in range(len(messages) - 1, -1, -1)
+             if isinstance(messages[i], HumanMessage)),
             None,
         )
+        context: list[dict] = []
         if last_human_idx and last_human_idx > 0:
-            window = prior_messages[max(0, last_human_idx - _CONTEXT_TURNS * 2):last_human_idx]
-            for m in window:
+            prior = messages[:last_human_idx]
+
+            # Collect with original position so we can merge back in order.
+            human_msgs: list[tuple[int, str, str]] = []  # (idx, role, text)
+            ai_msgs:    list[tuple[int, str, str]] = []
+
+            for i, m in enumerate(prior):
                 if isinstance(m, HumanMessage):
                     text = m.content if isinstance(m.content, str) else " ".join(
                         b.get("text", "") for b in m.content
                         if isinstance(b, dict) and b.get("type") == "text"
                     )
-                    context.append({"role": "user", "content": text})
+                    human_msgs.append((i, "user", text))
                 elif isinstance(m, AIMessage) and not m.tool_calls:
-                    # Only include final answers (no tool-call intermediate steps)
+                    # Only final answers, skip intermediate tool-call steps
                     text = m.content if isinstance(m.content, str) else ""
                     if text:
-                        context.append({"role": "assistant", "content": text})
+                        ai_msgs.append((i, "assistant", text))
+
+            def _first_and_last3(lst: list) -> list:
+                if len(lst) <= 4:
+                    return lst
+                seen: set[int] = {lst[0][0]}
+                result = [lst[0]]
+                for item in lst[-3:]:
+                    if item[0] not in seen:
+                        result.append(item)
+                        seen.add(item[0])
+                return result
+
+            selected = sorted(
+                _first_and_last3(human_msgs) + _first_and_last3(ai_msgs),
+                key=lambda x: x[0],
+            )
+            context = [{"role": role, "content": text} for _, role, text in selected]
 
         active = skill_router.classify(query_text, context=context or None)
         instructions = load_skill_instructions(active)
