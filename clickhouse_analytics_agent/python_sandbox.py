@@ -164,32 +164,28 @@ class PythonSandbox:
 
         _patched_builtins = {**vars(_builtins_module), "print": _captured_print}
 
-        local_vars = {
-            "df": df,
-            "pd": pd,
-            "np": np,
-            "plt": _plt_proxy,   # proxy: close()/savefig() are no-ops
-            "sns": sns,
-            "result": None,  # agent sets this for final text output
-            "df_info": df_info,
-        }
-
         plots: list[str] = []
 
-        # Libraries are placed in globals so they remain accessible inside
-        # user-defined lambdas called back by pandas/numpy (e.g. .apply()).
-        # local_vars (df, result, df_info) take precedence over globals in exec.
+        # Single namespace for exec: all names — pre-set vars, libraries, and
+        # user-defined variables — live in one dict. This is essential because
+        # when exec is called with separate globals/locals, functions and lambdas
+        # defined inside the exec'd code use globals as their __globals__, making
+        # any top-level local variable invisible inside those functions/lambdas.
+        # One dict eliminates that split entirely.
         sandbox_globals = {
             "__builtins__": _patched_builtins,
             "pd": pd,
             "np": np,
             "plt": _plt_proxy,   # proxy: close()/savefig() are no-ops
             "sns": sns,
+            "df": df,
+            "result": None,  # agent sets this for final text output
+            "df_info": df_info,
         }
 
         try:
             # ── Execute code ────────────────────────────────────────────────
-            exec(code, sandbox_globals, local_vars)  # noqa: S102
+            exec(code, sandbox_globals)  # noqa: S102
 
             # ── Capture only figures created by THIS call ──────────────────
             _my_fignums: set[int] = set(plt.get_fignums()) - _before_fignums
@@ -203,7 +199,7 @@ class PythonSandbox:
                 buf.close()
 
             # ── Extract `result` variable ──────────────────────────────────
-            result_value = local_vars.get("result")
+            result_value = sandbox_globals.get("result")
             if isinstance(result_value, pd.DataFrame):
                 # Convert DataFrame to Markdown table
                 result_value = result_value.to_markdown(index=False)
@@ -267,4 +263,4 @@ class PythonSandbox:
                     plt.close(fig_num)
                 except Exception:
                     pass
-            local_vars.clear()
+            sandbox_globals.clear()

@@ -116,12 +116,16 @@ def _build_router_prompt() -> str:
 """
 
 
-def classify(query: str) -> list[str]:
+def classify(query: str, context: list[dict] | None = None) -> list[str]:
     """
     Классифицировать запрос и вернуть список активных skills.
 
     Args:
-        query: Текст запроса пользователя.
+        query:   Текст последнего сообщения пользователя.
+        context: Предыдущие сообщения диалога в формате
+                 [{"role": "user"|"assistant", "content": str}, …].
+                 Передаются как история перед последним запросом, чтобы
+                 роутер мог понять контекст ("да", "продолжи", "ещё раз" и т.п.).
 
     Returns:
         Список имён skills из SKILLS. При ошибке — пустой список.
@@ -137,10 +141,31 @@ def classify(query: str) -> list[str]:
         # E.g. "Привет\n\n1. Схема таблицы?" → "1. Схема таблицы?"
         routing_query = _strip_greeting_prefix(query)
 
-        response = llm.invoke([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": routing_query},
-        ])
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+        # Inject conversation history so the router understands context-dependent
+        # replies like "да", "продолжи", "покажи ещё".
+        #
+        # Truncation rules (applied only here, main agent is unaffected):
+        #   user messages      — passed through fully (no truncation)
+        #   assistant messages — first 400 chars (topic) + last 5 non-empty lines
+        #                        (where the agent's closing question usually sits)
+        if context:
+            for msg in context:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if not content:
+                    continue
+                if role == "assistant" and len(content) > 400:
+                    head = content[:400]
+                    tail_lines = [l for l in content.splitlines() if l.strip()][-5:]
+                    tail = "\n".join(tail_lines)
+                    content = head + "\n…\n" + tail
+                messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": routing_query})
+
+        response = llm.invoke(messages)
 
         raw = response.content if isinstance(response.content, str) else str(response.content)
         raw = raw.strip()
