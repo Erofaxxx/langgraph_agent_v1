@@ -88,6 +88,16 @@ SKILLS: dict[str, dict] = {
         ),
         "full_path": _SKILLS_DIR / "segmentation.md",
     },
+    "attribution": {
+        "router_hint": (
+            "атрибуция, data-driven атрибуция, вклад канала, Markov, Shapley, "
+            "linear attribution, u-shaped, time decay, позиционная атрибуция, "
+            "какой канал важнее, куда вкладывать бюджет, мультиканальная атрибуция, "
+            "removal effect, attribution credit, customer journey attribution, "
+            "какие каналы закрывают сделку, какие каналы открывают, attribution share"
+        ),
+        "full_path": _SKILLS_DIR / "attribution.md",
+    },
 }
 
 
