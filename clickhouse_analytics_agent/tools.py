@@ -128,6 +128,10 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
         from python_sandbox import PythonSandbox
         result = PythonSandbox().execute(code=code, parquet_path=parquet_path)
         plots: list[str] = result.pop("plots", [])
+        # plots_count lets the LLM know how many charts were delivered to the
+        # user — visible in the compressed ToolMessage on retry calls, so the
+        # agent can skip rebuilding visualisations that are already shown.
+        result["plots_count"] = len(plots)
         content = _cap_result(json.dumps(result, ensure_ascii=False, default=str))
         return content, plots
     except Exception as exc:

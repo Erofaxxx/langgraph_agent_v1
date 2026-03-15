@@ -117,13 +117,17 @@ def _compress_tool_message(msg: ToolMessage) -> ToolMessage:
         elif tool_name == "python_analysis":
             data = json.loads(content)
             result_text = data.get("result") or ""
-            new_content = json.dumps(
-                {
-                    "success": data.get("success"),
-                    "result": result_text[:500] + ("…" if len(result_text) > 500 else ""),
-                },
-                ensure_ascii=False,
-            )
+            plots_count = data.get("plots_count", 0)
+            compressed: dict = {
+                "success": data.get("success"),
+                "result": result_text[:500] + ("…" if len(result_text) > 500 else ""),
+            }
+            # Preserve plots_count so the agent knows charts were already
+            # delivered to the user — prevents rebuilding visualisations on
+            # fix/retry calls and avoids duplicate graphs.
+            if plots_count:
+                compressed["plots_delivered"] = plots_count
+            new_content = json.dumps(compressed, ensure_ascii=False)
 
         else:
             return msg

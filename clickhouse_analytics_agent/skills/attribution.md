@@ -53,7 +53,7 @@ FROM dm_conversion_paths
 WHERE converted = 1
 ```
 
-### Для Markov Chain (нужны и 0, и 1 — выборка неконвертировавших)
+### Для Markov Chain — по каналам (channels_path)
 
 ```sql
 -- Все converted=1 + ~30K случайных converted=0
@@ -69,15 +69,37 @@ WHERE converted = 1
 
 > Выборка 1/13 от 379K ≈ 29K строк. Итого ~34K строк — достаточно для надёжного Markov, время расчёта < 30 сек.
 
-### Для атрибуции по источникам (utm_source)
+### Для Markov Chain — по источникам (sources_path) или кампаниям
+
+Markov **всегда** требует null-пути (converted=0). Тот же шаблон с выборкой, добавить нужные колонки:
 
 ```sql
+-- ВАЖНО: НЕ убирать converted=0 — без null-путей base_p = 1.0 (математически неверно)
 SELECT
     client_id,
     converted,
     revenue,
     channels_path,
     sources_path,
+    campaigns_path        -- добавить если нужна атрибуция по кампаниям
+FROM dm_conversion_paths
+WHERE converted = 1
+   OR (converted = 0 AND rand() % 13 = 0)
+```
+
+### Для Linear / U-Shape / Time Decay (только конвертировавшие)
+
+Эти модели не требуют null-путей — только `converted = 1`. Добавить нужные колонки:
+
+```sql
+SELECT
+    client_id,
+    converted,
+    revenue,
+    path_length,
+    channels_path,
+    sources_path,
+    campaigns_path,
     days_from_first_path
 FROM dm_conversion_paths
 WHERE converted = 1
@@ -250,40 +272,50 @@ def conv_prob(matrix):
 base_p = conv_prob(T)
 print(f"Базовая вероятность конверсии: {base_p:.4f}")
 
-# 4. Removal effect: убираем канал → считаем падение вероятности
-channels = [s for s in states if s not in (START, CONV, NULL)]
-removal = {}
-for ch in channels:
-    T_rem = T.copy()
-    ci, ni = idx[ch], idx[NULL]
-    for i in range(n):
-        if T_rem[i][ci] > 0:
-            T_rem[i][ni] += T_rem[i][ci]
-            T_rem[i][ci] = 0.0
-    removal[ch] = max(0.0, base_p - conv_prob(T_rem))
-
-# 5. Attribution credits
-total_removal = sum(removal.values())
-total_revenue = float(df[df['converted'] == 1]['revenue'].sum())
-
-if total_removal == 0:
-    result = "⚠️ Markov: нулевые removal effects — недостаточно данных."
+# Защита: base_p ≈ 1.0 означает отсутствие null-путей (выгружено только converted=1)
+# Без null-путей removal effects математически неверны — сообщаем об ошибке данных
+if base_p >= 0.99:
+    result = (
+        "⚠️ ОШИБКА ДАННЫХ: base_p = {:.4f}\n\n"
+        "В выгрузке отсутствуют пути `converted=0` — Markov работает некорректно.\n"
+        "Повтори `clickhouse_query` с условием:\n"
+        "```sql\nWHERE converted = 1\n   OR (converted = 0 AND rand() % 13 = 0)\n```"
+    ).format(base_p)
 else:
-    rows = []
-    for ch in sorted(removal, key=lambda x: -removal[x]):
-        share = removal[ch] / total_removal
-        attr_rev = share * total_revenue
-        re_pct = removal[ch] / base_p * 100
-        rows.append(f"| {ch} | {re_pct:.1f}% | {share:.1%} | {attr_rev:,.0f} ₽ |")
+    # 4. Removal effect: убираем канал → считаем падение вероятности
+    channels = [s for s in states if s not in (START, CONV, NULL)]
+    removal = {}
+    for ch in channels:
+        T_rem = T.copy()
+        ci, ni = idx[ch], idx[NULL]
+        for i in range(n):
+            if T_rem[i][ci] > 0:
+                T_rem[i][ni] += T_rem[i][ci]
+                T_rem[i][ci] = 0.0
+        removal[ch] = max(0.0, base_p - conv_prob(T_rem))
 
-    result = "## Markov Chain Attribution\n\n"
-    result += "| Канал | Removal Effect | Attribution Share | Attributed Revenue |\n"
-    result += "|---|---|---|---|\n"
-    result += "\n".join(rows)
-    result += (
-        f"\n\n**Removal Effect** — на сколько падает вероятность конверсии при удалении канала из всех путей.\n"
-        f"База: {base_p:.4f} | Конверсий: {df['converted'].sum():,} | Путей: {len(paths):,}"
-    )
+    # 5. Attribution credits
+    total_removal = sum(removal.values())
+    total_revenue = float(df[df['converted'] == 1]['revenue'].sum())
+
+    if total_removal == 0:
+        result = "⚠️ Markov: нулевые removal effects — недостаточно данных."
+    else:
+        rows = []
+        for ch in sorted(removal, key=lambda x: -removal[x]):
+            share = removal[ch] / total_removal
+            attr_rev = share * total_revenue
+            re_pct = removal[ch] / base_p * 100
+            rows.append(f"| {ch} | {re_pct:.1f}% | {share:.1%} | {attr_rev:,.0f} ₽ |")
+
+        result = "## Markov Chain Attribution\n\n"
+        result += "| Канал | Removal Effect | Attribution Share | Attributed Revenue |\n"
+        result += "|---|---|---|---|\n"
+        result += "\n".join(rows)
+        result += (
+            f"\n\n**Removal Effect** — на сколько падает вероятность конверсии при удалении канала из всех путей.\n"
+            f"База: {base_p:.4f} | Конверсий: {df['converted'].sum():,} | Путей: {len(paths):,}"
+        )
 ```
 
 ---
