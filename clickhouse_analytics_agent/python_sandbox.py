@@ -11,6 +11,7 @@ user-provided code in a controlled namespace. Captures:
 import base64
 import builtins as _builtins_module
 import io
+import threading
 import traceback
 
 # IMPORTANT: set non-interactive backend BEFORE importing pyplot
@@ -41,19 +42,99 @@ except Exception:
 sns.set_style("whitegrid")
 sns.set_palette("husl")
 
+# ─── Thread-local guard: plt.close / plt.show / plt.savefig protection ────────
+# When agent code does `import matplotlib.pyplot as plt` it replaces the proxy
+# with the real module singleton.  We patch the module-level functions ONCE so
+# our patched versions remain effective regardless of how the module is imported.
+# Thread-local flag ensures the guard only blocks close() during exec() and
+# does NOT interfere with the sandbox's own cleanup in the finally block.
+_tls = threading.local()
+_orig_plt_close   = plt.close
+_orig_plt_savefig = plt.savefig
+_orig_plt_show    = plt.show
+
+
+def _guarded_close(*a, **kw):
+    """No-op while exec is active; delegates to real close otherwise."""
+    if getattr(_tls, "exec_active", False):
+        return
+    return _orig_plt_close(*a, **kw)
+
+
+def _guarded_savefig(*a, **kw):
+    """Always no-op: sandbox captures figures directly via fig.savefig(buf)."""
+    return
+
+
+def _guarded_show(*a, **kw):
+    """Always no-op: non-interactive Agg backend, no display available."""
+    return
+
+
+plt.close   = _guarded_close
+plt.savefig = _guarded_savefig
+plt.show    = _guarded_show
+
+
+# ─── Safe pd.read_parquet: applies the same coercions as the sandbox ──────────
+# Agent code often calls pd.read_parquet() directly to load additional datasets.
+# This wrapper ensures those DataFrames receive the same type normalisations
+# (numeric/datetime coercion, numpy array → list) as the primary `df`.
+_orig_pd_read_parquet = pd.read_parquet
+
+
+def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply ClickHouse-specific type coercions to a freshly loaded DataFrame.
+
+    1. Object columns that are numeric strings → float64
+    2. Object columns that are date strings → datetime64
+    3. numpy ndarray cells (ClickHouse Array columns) → Python list
+    """
+    for col in list(df.select_dtypes(include="object").columns):
+        non_null = df[col].dropna()
+        if len(non_null) == 0:
+            continue
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.notna().sum() / len(non_null) > 0.8:
+            df[col] = converted
+            continue
+        try:
+            dt_converted = pd.to_datetime(df[col], errors="coerce", format="mixed")
+            if dt_converted.notna().sum() / len(non_null) > 0.8:
+                df[col] = dt_converted
+        except Exception:
+            pass
+    for col in df.columns:
+        non_null = df[col].dropna()
+        if len(non_null) == 0:
+            continue
+        if isinstance(non_null.iloc[0], np.ndarray):
+            df[col] = df[col].apply(
+                lambda v: v.tolist() if isinstance(v, np.ndarray) else v
+            )
+    return df
+
+
+def _safe_read_parquet(path, *args, **kwargs):
+    return _coerce_df(_orig_pd_read_parquet(path, *args, **kwargs))
+
+
+pd.read_parquet = _safe_read_parquet
+
 
 class _PlotProxy:
     """
-    Proxy for matplotlib.pyplot injected into the agent's execution namespace.
+    Proxy for matplotlib.pyplot injected into the agent's execution namespace
+    as the initial value of `plt`.
 
-    Makes plt.close() and plt.savefig() silent no-ops so that agent code
-    cannot accidentally destroy figures before the sandbox captures them.
-    All other plt attributes/methods delegate transparently to the real plt.
-    This works even when the visualization skill is NOT loaded.
+    Belt-and-suspenders on top of the module-level patches above: even if the
+    agent uses `plt` directly (without re-importing), close/savefig/show are
+    still no-ops.  All other attributes delegate to the real module.
     """
     def __getattr__(self, name: str):
-        if name in ("close", "savefig"):
-            return lambda *a, **kw: None  # no-op — figure stays open for capture
+        if name in ("close", "savefig", "show"):
+            return lambda *a, **kw: None
         return getattr(plt, name)
 
 
@@ -84,9 +165,22 @@ class PythonSandbox:
             "error": str | None,
           }
         """
-        # ── Load data from Parquet ──────────────────────────────────────────
+        # ── Load data from Parquet (with coercions applied by _safe_read_parquet) ─
         try:
-            df = pd.read_parquet(parquet_path)
+            df = _orig_pd_read_parquet(parquet_path)  # load raw first for error handling
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "output": "",
+                "result": None,
+                "plots": [],
+                "error": (
+                    f"Parquet file not found: '{parquet_path}'.\n"
+                    "The file may have been deleted between turns. "
+                    "Re-run the clickhouse_query that produced this data and use "
+                    "the fresh parquet_path returned by that call."
+                ),
+            }
         except Exception as exc:
             return {
                 "success": False,
@@ -96,42 +190,17 @@ class PythonSandbox:
                 "error": f"Failed to load parquet file '{parquet_path}': {exc}",
             }
 
-        # ── Auto-coerce object columns to numeric or datetime ───────────────
-        # ClickHouse can return Date/DateTime as strings or Decimal as objects.
-        # This prevents common TypeErrors in agent-written Python code.
-        for col in list(df.select_dtypes(include="object").columns):
-            non_null = df[col].dropna()
-            if len(non_null) == 0:
-                continue
-            # Try numeric conversion first
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if converted.notna().sum() / len(non_null) > 0.8:
-                df[col] = converted
-                continue
-            # Try datetime conversion
-            try:
-                dt_converted = pd.to_datetime(df[col], errors="coerce", format="mixed")
-                if dt_converted.notna().sum() / len(non_null) > 0.8:
-                    df[col] = dt_converted
-            except Exception:
-                pass
+        # Apply coercions: numeric/datetime strings, numpy arrays → lists.
+        # _coerce_df is also wired into pd.read_parquet so agent code loading
+        # additional datasets gets the same normalisation automatically.
+        df = _coerce_df(df)
 
-        # ── Convert numpy-array columns to Python lists ────────────────────
-        # ClickHouse Array(X) columns survive parquet round-trip as numpy
-        # object-arrays. Standard pandas ops (to_markdown, tabulate) raise
-        # "truth value of an array is ambiguous" on them. Converting to plain
-        # Python lists makes the data fully compatible with all pandas/tabulate
-        # operations while preserving the values.
-        array_cols: list[str] = []
-        for col in df.columns:
-            non_null = df[col].dropna()
-            if len(non_null) == 0:
-                continue
-            if isinstance(non_null.iloc[0], np.ndarray):
-                df[col] = df[col].apply(
-                    lambda v: v.tolist() if isinstance(v, np.ndarray) else v
-                )
-                array_cols.append(col)
+        # ── Detect Array columns for df_info ───────────────────────────────
+        # After _coerce_df, numpy arrays are already converted to Python lists.
+        array_cols: list[str] = [
+            col for col in df.columns
+            if len(df[col].dropna()) > 0 and isinstance(df[col].dropna().iloc[0], list)
+        ]
 
         # ── Snapshot existing figure numbers before exec ───────────────────
         # matplotlib is a global singleton shared across all parallel calls.
@@ -176,12 +245,18 @@ class PythonSandbox:
             "__builtins__": _patched_builtins,
             "pd": pd,
             "np": np,
-            "plt": _plt_proxy,   # proxy: close()/savefig() are no-ops
+            "plt": _plt_proxy,   # proxy: close()/savefig()/show() are no-ops
             "sns": sns,
             "df": df,
             "result": None,  # agent sets this for final text output
             "df_info": df_info,
         }
+
+        # Activate the thread-local guard: plt.close() becomes a no-op for
+        # THIS thread while exec runs, even if agent code replaces the proxy
+        # via `import matplotlib.pyplot as plt`.  The finally block disables
+        # the guard so the sandbox's own cleanup calls work normally.
+        _tls.exec_active = True
 
         try:
             # ── Execute code ────────────────────────────────────────────────
@@ -255,12 +330,14 @@ class PythonSandbox:
             }
 
         finally:
+            # Disable guard first so that plt.close() below is the real one.
+            _tls.exec_active = False
             # Close only figures created by THIS call, not figures from
             # other parallel calls that may still be running.
             _to_close = set(plt.get_fignums()) - _before_fignums
             for fig_num in _to_close:
                 try:
-                    plt.close(fig_num)
+                    _orig_plt_close(fig_num)  # call original directly — guard is off
                 except Exception:
                     pass
             sandbox_globals.clear()
