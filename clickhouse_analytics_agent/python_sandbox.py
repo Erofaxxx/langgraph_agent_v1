@@ -11,6 +11,7 @@ user-provided code in a controlled namespace. Captures:
 import base64
 import builtins as _builtins_module
 import io
+import re
 import threading
 import traceback
 
@@ -178,6 +179,31 @@ class _PlotProxy:
 _plt_proxy = _PlotProxy()
 
 
+# ─── Detector: Python syntax leaked into result via broken f-strings ──────────
+# Matches patterns that look like Python code accidentally rendered as text,
+# e.g.: "2.9 if not np.isnan(t['avg_path']) else '—'"
+# These arise when a ternary expression is written OUTSIDE the {} in an f-string.
+_PYTHON_LEAK_RE = re.compile(
+    r"(?:"
+    r"\bif\s+(not\s+)?(?:np|pd)\.\w+\("       # "if not np.isnan(" / "if pd.notna("
+    r"|else\s+['\"][^'\"]{0,20}['\"]"          # "else '—'" / "else 'N/A'"
+    r"|\b(?:np|pd)\.\w+\(['\"]?\w"             # "np.isnan(x" / "pd.notna(v"
+    r")",
+    re.IGNORECASE,
+)
+
+# Only flag if the suspicious text sits inside a table cell or inline value
+# (i.e., not inside a fenced code block where Python IS expected).
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
+
+
+def _has_python_leak(text: str) -> bool:
+    """Return True if result text appears to contain leaked Python expressions."""
+    # Strip fenced code blocks — Python there is intentional
+    stripped = _CODE_FENCE_RE.sub("", text)
+    return bool(_PYTHON_LEAK_RE.search(stripped))
+
+
 class PythonSandbox:
     """
     Executes Python analysis code with data pre-loaded from a Parquet file.
@@ -343,15 +369,25 @@ class PythonSandbox:
                     + raw_output[-half:]
                 )
 
-            # ── Warn agent if result was not set but stdout has data ───────
-            # Agents sometimes only use print() and forget to set result.
-            # Without result, the LLM context gets no structured answer and
-            # may hallucinate in the next turn.
+            # ── Auto-fill result from stdout when not explicitly set ───────
+            # If the agent only used print() and forgot result, we use stdout
+            # directly — no extra tool call needed to "fix" it.
             if result_value is None and raw_output.strip():
+                result_value = raw_output
+
+            # ── Detect Python code leaked into result via broken f-strings ──
+            # Pattern: f"{val:.1f} if pd.notna(val) else '—'" produces a
+            # result string that contains Python syntax as literal text.
+            # Python doesn't raise an error, but the output is wrong.
+            # We detect common leaked patterns and prepend a warning so the
+            # agent can fix its f-string in the same context without a retry.
+            if result_value and _has_python_leak(result_value):
                 result_value = (
-                    "⚠️ result не установлен — данные есть только в stdout.\n"
-                    "Добавь в конец кода: result = df  или  result = 'текст'.\n"
-                    f"stdout (первые 500 символов):\n{raw_output[:500]}"
+                    "⚠️ ПРЕДУПРЕЖДЕНИЕ: в result обнаружен Python-код — вероятна ошибка в f-строке.\n"
+                    "Используй промежуточную переменную вместо ternary внутри форматирующего {}:\n"
+                    "  ❌  f\"| {val:.1f} if pd.notna(val) else '—' |\"\n"
+                    "  ✅  val_str = f\"{val:.1f}\" if pd.notna(val) else \"—\"; f\"| {val_str} |\"\n\n"
+                    + result_value
                 )
 
             # ── Truncate result variable ────────────────────────────────────
