@@ -704,6 +704,9 @@ class AnalyticsAgent:
 
         Runs once per user turn (at graph entry point) before agent_node.
         Updates active_skills and skill_instructions in the state.
+
+        To handle context-dependent replies ("да", "продолжи", "ещё раз"),
+        we pass the last few exchanges to the router so it can infer intent.
         """
         messages = state.get("messages", [])
         last_human = next(
@@ -722,7 +725,35 @@ class AnalyticsAgent:
                 if isinstance(b, dict) and b.get("type") == "text"
             )
 
-        active = skill_router.classify(query_text)
+        # ── Build routing context from recent history ──────────────────────
+        # Include the last 3 exchanges (human + assistant) before the current
+        # message so the router understands replies like "да", "продолжи".
+        # We stop before the last HumanMessage (it is `query_text` itself).
+        _CONTEXT_TURNS = 3
+        context: list[dict] = []
+        # Walk backwards through messages before the last human message
+        prior_messages = list(messages)
+        last_human_idx = next(
+            (i for i in range(len(prior_messages) - 1, -1, -1)
+             if isinstance(prior_messages[i], HumanMessage)),
+            None,
+        )
+        if last_human_idx and last_human_idx > 0:
+            window = prior_messages[max(0, last_human_idx - _CONTEXT_TURNS * 2):last_human_idx]
+            for m in window:
+                if isinstance(m, HumanMessage):
+                    text = m.content if isinstance(m.content, str) else " ".join(
+                        b.get("text", "") for b in m.content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                    context.append({"role": "user", "content": text})
+                elif isinstance(m, AIMessage) and not m.tool_calls:
+                    # Only include final answers (no tool-call intermediate steps)
+                    text = m.content if isinstance(m.content, str) else ""
+                    if text:
+                        context.append({"role": "assistant", "content": text})
+
+        active = skill_router.classify(query_text, context=context or None)
         instructions = load_skill_instructions(active)
 
         return {"active_skills": active, "skill_instructions": instructions}
