@@ -49,9 +49,14 @@ sns.set_palette("husl")
 # Thread-local flag ensures the guard only blocks close() during exec() and
 # does NOT interfere with the sandbox's own cleanup in the finally block.
 _tls = threading.local()
+_figure_lock = threading.Lock()  # guards plt.get_fignums() snapshots across parallel calls
+
 _orig_plt_close   = plt.close
 _orig_plt_savefig = plt.savefig
 _orig_plt_show    = plt.show
+_orig_plt_clf     = plt.clf
+_orig_plt_cla     = plt.cla
+_orig_style_use   = plt.style.use
 
 
 def _guarded_close(*a, **kw):
@@ -71,9 +76,33 @@ def _guarded_show(*a, **kw):
     return
 
 
-plt.close   = _guarded_close
-plt.savefig = _guarded_savefig
-plt.show    = _guarded_show
+def _guarded_clf(*a, **kw):
+    """No-op while exec is active: prevents agent from clearing captured figures."""
+    if getattr(_tls, "exec_active", False):
+        return
+    return _orig_plt_clf(*a, **kw)
+
+
+def _guarded_cla(*a, **kw):
+    """No-op while exec is active: prevents agent from clearing axes."""
+    if getattr(_tls, "exec_active", False):
+        return
+    return _orig_plt_cla(*a, **kw)
+
+
+def _guarded_style_use(style, *a, **kw):
+    """No-op while exec is active: prevents agent from changing global rcParams via style."""
+    if getattr(_tls, "exec_active", False):
+        return
+    return _orig_style_use(style, *a, **kw)
+
+
+plt.close     = _guarded_close
+plt.savefig   = _guarded_savefig
+plt.show      = _guarded_show
+plt.clf       = _guarded_clf
+plt.cla       = _guarded_cla
+plt.style.use = _guarded_style_use
 
 
 # ─── Safe pd.read_parquet: applies the same coercions as the sandbox ──────────
@@ -113,6 +142,14 @@ def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].apply(
                 lambda v: v.tolist() if isinstance(v, np.ndarray) else v
             )
+    # Restore whole-number float64 columns to nullable integer (Int64).
+    # ClickHouse Int*/UInt* columns often arrive as float64 after coerce due
+    # to NaN presence.  47.0 → 47 prevents confusing LLM output and broken
+    # equality checks (orders == 47 fails for 47.0).
+    for col in list(df.select_dtypes("float64").columns):
+        s = df[col].dropna()
+        if len(s) > 0 and (s == s.astype("int64")).all():
+            df[col] = df[col].astype("Int64")
     return df
 
 
@@ -133,7 +170,7 @@ class _PlotProxy:
     still no-ops.  All other attributes delegate to the real module.
     """
     def __getattr__(self, name: str):
-        if name in ("close", "savefig", "show"):
+        if name in ("close", "savefig", "show", "clf", "cla"):
             return lambda *a, **kw: None
         return getattr(plt, name)
 
@@ -206,16 +243,25 @@ class PythonSandbox:
         # matplotlib is a global singleton shared across all parallel calls.
         # We record which figures exist BEFORE our exec, then after exec we
         # capture and close only the NEW figures created by THIS call.
-        # This prevents parallel python_analysis calls from interfering with
-        # each other's figures via plt.close("all").
-        _before_fignums: set[int] = set(plt.get_fignums())
+        # _figure_lock makes the snapshot atomic so parallel calls don't
+        # interleave their before/after reads.
+        _saved_rc = dict(plt.rcParams)  # snapshot to restore after exec
+        with _figure_lock:
+            _before_fignums: set[int] = set(plt.get_fignums())
 
         # ── Prepare execution namespace ────────────────────────────────────
         # df_info shows dtype for regular cols and "Array" for list cols so
         # the agent knows to use .explode() / .apply(len) instead of to_markdown.
-        df_info = {col: str(dtype) for col, dtype in df.dtypes.items()}
-        for col in array_cols:
-            df_info[col] = "Array"
+        df_info = {}
+        for col, dtype in df.dtypes.items():
+            null_count = int(df[col].isna().sum())
+            if col in array_cols:
+                entry = "Array"
+            else:
+                entry = str(dtype)
+            if null_count > 0:
+                entry += f" (nulls={null_count})"
+            df_info[col] = entry
 
         # ── Thread-safe stdout capture ─────────────────────────────────────
         # contextlib.redirect_stdout is NOT thread-safe: it sets sys.stdout
@@ -263,15 +309,16 @@ class PythonSandbox:
             exec(code, sandbox_globals)  # noqa: S102
 
             # ── Capture only figures created by THIS call ──────────────────
-            _my_fignums: set[int] = set(plt.get_fignums()) - _before_fignums
-            for fig_num in sorted(_my_fignums):
-                fig = plt.figure(fig_num)
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-                buf.seek(0)
-                b64 = base64.b64encode(buf.read()).decode("utf-8")
-                plots.append(f"data:image/png;base64,{b64}")
-                buf.close()
+            with _figure_lock:
+                _my_fignums: set[int] = set(plt.get_fignums()) - _before_fignums
+                for fig_num in sorted(_my_fignums):
+                    fig = plt.figure(fig_num)
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                    buf.seek(0)
+                    b64 = base64.b64encode(buf.read()).decode("utf-8")
+                    plots.append(f"data:image/png;base64,{b64}")
+                    buf.close()
 
             # ── Extract `result` variable ──────────────────────────────────
             result_value = sandbox_globals.get("result")
@@ -294,6 +341,17 @@ class PythonSandbox:
                     + f"\n… [stdout truncated, showing first+last {half} chars"
                     f" of {len(raw_output)} total — data in parquet is complete] …\n"
                     + raw_output[-half:]
+                )
+
+            # ── Warn agent if result was not set but stdout has data ───────
+            # Agents sometimes only use print() and forget to set result.
+            # Without result, the LLM context gets no structured answer and
+            # may hallucinate in the next turn.
+            if result_value is None and raw_output.strip():
+                result_value = (
+                    "⚠️ result не установлен — данные есть только в stdout.\n"
+                    "Добавь в конец кода: result = df  или  result = 'текст'.\n"
+                    f"stdout (первые 500 символов):\n{raw_output[:500]}"
                 )
 
             # ── Truncate result variable ────────────────────────────────────
@@ -321,9 +379,17 @@ class PythonSandbox:
             full_tb = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             error_text = full_tb[-2000:] if len(full_tb) > 2000 else full_tb
             raw_output = stdout_capture.getvalue()
+            if len(raw_output) > 8000:
+                half = 4000
+                raw_output = (
+                    raw_output[:half]
+                    + f"\n… [stdout truncated, showing first+last {half} chars"
+                    f" of {len(raw_output)} total] …\n"
+                    + raw_output[-half:]
+                )
             return {
                 "success": False,
-                "output": raw_output[:8000] if len(raw_output) > 8000 else raw_output,
+                "output": raw_output,
                 "result": None,
                 "plots": plots,  # return any plots captured before the error
                 "error": error_text,
@@ -332,12 +398,16 @@ class PythonSandbox:
         finally:
             # Disable guard first so that plt.close() below is the real one.
             _tls.exec_active = False
+            # Restore rcParams to pre-exec state so agent code cannot
+            # permanently change styles for subsequent calls.
+            plt.rcParams.update(_saved_rc)
             # Close only figures created by THIS call, not figures from
             # other parallel calls that may still be running.
-            _to_close = set(plt.get_fignums()) - _before_fignums
-            for fig_num in _to_close:
-                try:
-                    _orig_plt_close(fig_num)  # call original directly — guard is off
-                except Exception:
-                    pass
+            with _figure_lock:
+                _to_close = set(plt.get_fignums()) - _before_fignums
+                for fig_num in _to_close:
+                    try:
+                        _orig_plt_close(fig_num)  # call original directly — guard is off
+                    except Exception:
+                        pass
             sandbox_globals.clear()
