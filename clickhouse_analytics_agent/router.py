@@ -145,7 +145,10 @@ def classify(query: str, context: list[dict] | None = None) -> list[str]:
 
         # Inject recent conversation history so the router understands
         # context-dependent replies like "да", "продолжи", "покажи ещё".
-        # We trim each message to 400 chars to keep the routing call cheap.
+        # Truncation strategy: keep first 200 chars (topic/intent) +
+        # last 3 non-empty lines (where agent questions usually appear).
+        # This way "да" after "Продолжить анализ кампаний?" is understood
+        # even when the full answer is several KB long.
         if context:
             for msg in context:
                 role = msg.get("role", "user")
@@ -153,7 +156,10 @@ def classify(query: str, context: list[dict] | None = None) -> list[str]:
                 if not content:
                     continue
                 if len(content) > 400:
-                    content = content[:400] + "…"
+                    head = content[:200]
+                    tail_lines = [l for l in content.splitlines() if l.strip()][-3:]
+                    tail = "\n".join(tail_lines)
+                    content = head + "\n…\n" + tail
                 messages.append({"role": role, "content": content})
 
         messages.append({"role": "user", "content": routing_query})
