@@ -104,16 +104,17 @@ def python_analysis(code: str, parquet_path: str) -> tuple[str, list[str]]:
     Execute Python to analyze data from a ClickHouse query result.
 
     `df` (pandas DataFrame) is pre-loaded with all transformations applied
-    (Array columns converted to lists, types coerced). NEVER call
-    pd.read_parquet() — it bypasses these transformations and re-reads raw data.
+    (Array columns converted to lists, types coerced).
     Available: df, pd, np, plt, sns, result=None, df_info (column type map).
+
+    To load additional datasets use pd.read_parquet(parquet_path) — the same
+    type coercions (numeric, datetime, Array→list) are applied automatically.
 
     Rules:
     1. Set `result` to a Markdown string (shown to the user).
     2. Use print() for intermediate logging (e.g. diagnostics, row counts).
     3. All open matplotlib figures are auto-captured as PNG after your code runs.
-       NEVER call plt.savefig() or plt.close() — savefig saves to disk (not
-       returned to user), and close() destroys the figure before capture → blank.
+       NEVER call plt.close() — it destroys the figure before capture → blank.
     4. Label charts in Russian; format numbers with thousands separators.
     5. Handle missing data and outliers before calculations: check for nulls,
        filter extreme outliers with quantile, never print raw Array columns
