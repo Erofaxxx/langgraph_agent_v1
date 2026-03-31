@@ -48,12 +48,40 @@ SKILLS: dict[str, dict] = {
     },
     "campaign_analysis": {
         "router_hint": (
-            "ROAS, CPC, CPM, CTR, CPA, кампании, расходы, бюджет, "
-            "рекламные кампании, utm_campaign, dm_campaigns, конверсия кампаний, "
-            "стоимость привлечения, окупаемость рекламы, spend,"
-            "first touch|last touch|атрибуция|откуда покупатели|dm_orders"
+            "каналы трафика, utm_source, utm_medium, utm_campaign, источник трафика, "
+            "откуда покупатели, first touch, last touch, атрибуция по каналам, "
+            "dm_orders, dm_traffic_performance, путь клиента до покупки, "
+            "конверсия по каналу, выручка по источнику, цикл сделки"
         ),
         "full_path": _SKILLS_DIR / "campaign_analysis.md",
+    },
+    "direct_performance": {
+        "router_hint": (
+            "ROAS, окупаемость рекламы, расходы Директа, бюджет кампании, "
+            "стоимость заказа, CPS, CPC, эффективность кампаний Директа, "
+            "атрибутированная выручка, прибыльные кампании, убыточные кампании, "
+            "dm_direct_enriched, dm_direct_by_adgroup, куда идёт бюджет, "
+            "сколько тратим, сколько зарабатываем, окупается ли реклама"
+        ),
+        "full_path": _SKILLS_DIR / "direct_performance.md",
+    },
+    "keyword_analysis": {
+        "router_hint": (
+            "ключевые слова, поисковые запросы, ключи, keyword, автотаргетинг, "
+            "минус-слова, ставки, позиции объявлений, слот, PREMIUMBLOCK, "
+            "что ищут пользователи, direct_criteria, direct_search_queries, "
+            "тип соответствия, AvgEffectiveBid, дорогие ключи, конвертирующие запросы"
+        ),
+        "full_path": _SKILLS_DIR / "keyword_analysis.md",
+    },
+    "geo_performance": {
+        "router_hint": (
+            "регион, город, гео, география, геотаргетинг, по регионам, по городам, "
+            "территория, где покупают, ROAS по городам, расходы по регионам, "
+            "dm_direct_by_geo, Москва vs регионы, региональная эффективность, "
+            "какие города приносят заказы, geo_city_map"
+        ),
+        "full_path": _SKILLS_DIR / "geo_performance.md",
     },
     "cohort_analysis": {
         "router_hint": (
