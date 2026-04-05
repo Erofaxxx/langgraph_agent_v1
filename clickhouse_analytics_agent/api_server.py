@@ -584,10 +584,14 @@ async def list_table_queries():
                 "name": name,
                 "description": q["description"],
                 "sortable_columns": q["sortable_columns"],
+                "filterable_zone_status": q.get("filterable_zone_status", False),
             }
             for name, q in QUERIES.items()
         ]
     }
+
+
+_ALLOWED_ZONE_STATUSES = {"red", "green", "yellow"}
 
 
 @app.get("/api/tables/{query_name}", tags=["tables"], summary="Выполнить именованный запрос")
@@ -596,6 +600,7 @@ async def get_table_data(
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
     limit: int = 50,
+    zone_status: Optional[str] = None,
 ):
     """
     Выполняет именованный SQL-запрос из queries.py и возвращает табличные данные.
@@ -604,6 +609,7 @@ async def get_table_data(
     - **sort_by** — имя колонки для сортировки (должна быть в sortable_columns)
     - **sort_dir** — направление: `asc` или `desc` (по умолчанию `desc`)
     - **limit** — количество строк: от 1 до 1000 (по умолчанию 50)
+    - **zone_status** — фильтр по зоне: `red`, `green` или `yellow` (только для запросов с filterable_zone_status)
 
     Формат ответа:
     ```json
@@ -622,6 +628,20 @@ async def get_table_data(
 
     query = QUERIES[query_name]
     sql = query["sql"].strip()
+
+    # Фильтр по zone_status — только для запросов с filterable_zone_status и только из whitelist
+    if zone_status is not None:
+        if not query.get("filterable_zone_status"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Query '{query_name}' does not support zone_status filter",
+            )
+        if zone_status not in _ALLOWED_ZONE_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid zone_status '{zone_status}'. Allowed: {sorted(_ALLOWED_ZONE_STATUSES)}",
+            )
+        sql += f"\nAND zone_status = '{zone_status}'"
 
     # Сортировка — только по белому списку колонок (защита от SQL injection)
     if sort_by is not None:
