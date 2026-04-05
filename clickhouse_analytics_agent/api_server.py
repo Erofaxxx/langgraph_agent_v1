@@ -536,6 +536,136 @@ async def delete_segment(
     return {"success": True}
 
 
+# ─── Tables: прямые запросы к ClickHouse ─────────────────────────────────────
+
+import decimal as _decimal
+import math as _math
+from datetime import date as _date, datetime as _datetime
+
+
+def _serialize_value(v):
+    """Конвертирует любое значение из ClickHouse в JSON-совместимый тип."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (_datetime, _date)):
+        return v.isoformat()
+    if isinstance(v, _decimal.Decimal):
+        f = float(v)
+        return None if _math.isnan(f) or _math.isinf(f) else round(f, 2)
+    # numpy-типы (если попадают сюда)
+    try:
+        import numpy as _np
+        if isinstance(v, _np.integer):
+            return int(v)
+        if isinstance(v, _np.floating):
+            return None if _np.isnan(v) else round(float(v), 2)
+    except ImportError:
+        pass
+    if isinstance(v, float):
+        return None if (_math.isnan(v) or _math.isinf(v)) else round(v, 2)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_serialize_value(i) for i in v]
+    if isinstance(v, dict):
+        return {str(k): _serialize_value(val) for k, val in v.items()}
+    return str(v)
+
+
+@app.get("/api/tables", tags=["tables"], summary="Список доступных именованных запросов")
+async def list_table_queries():
+    """Возвращает все доступные query_name с описаниями и списком колонок для сортировки."""
+    from queries import QUERIES
+    return {
+        "queries": [
+            {
+                "name": name,
+                "description": q["description"],
+                "sortable_columns": q["sortable_columns"],
+            }
+            for name, q in QUERIES.items()
+        ]
+    }
+
+
+@app.get("/api/tables/{query_name}", tags=["tables"], summary="Выполнить именованный запрос")
+async def get_table_data(
+    query_name: str,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+    limit: int = 50,
+):
+    """
+    Выполняет именованный SQL-запрос из queries.py и возвращает табличные данные.
+
+    Параметры:
+    - **sort_by** — имя колонки для сортировки (должна быть в sortable_columns)
+    - **sort_dir** — направление: `asc` или `desc` (по умолчанию `desc`)
+    - **limit** — количество строк: от 1 до 1000 (по умолчанию 50)
+
+    Формат ответа:
+    ```json
+    {
+      "columns": ["date", "clicks", "spend"],
+      "rows": [["2026-04-01", 1200, 450.5], ...],
+      "row_count": 50
+    }
+    ```
+    """
+    from queries import QUERIES
+    import pandas as _pd
+
+    if query_name not in QUERIES:
+        raise HTTPException(status_code=404, detail=f"Query '{query_name}' not found")
+
+    query = QUERIES[query_name]
+    sql = query["sql"].strip()
+
+    # Сортировка — только по белому списку колонок (защита от SQL injection)
+    if sort_by is not None:
+        if sort_by not in query["sortable_columns"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot sort by '{sort_by}'. Allowed: {query['sortable_columns']}",
+            )
+        direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
+        sql += f"\nORDER BY {sort_by} {direction}"
+
+    # Лимит — защита от огромных выборок
+    limit = max(1, min(limit, 1000))
+    sql += f"\nLIMIT {limit}"
+
+    try:
+        from tools import _ch_lock, _get_ch_client
+        with _ch_lock:
+            result = await asyncio.to_thread(_get_ch_client().execute_query, sql, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Query failed"))
+
+    # Читаем parquet и сериализуем все типы
+    try:
+        df = _pd.read_parquet(result["parquet_path"])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read result: {exc}")
+
+    columns = df.columns.tolist()
+    rows = [
+        [_serialize_value(cell) for cell in row]
+        for row in df.itertuples(index=False, name=None)
+    ]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+    }
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("api_server:app", host=HOST, port=PORT, log_level="info")
