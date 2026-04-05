@@ -28,6 +28,7 @@ QUERIES: dict[str, dict] = {
             WHERE zone_status != 'pending' OR zone_status IS NULL
         """,
         "sortable_columns": ["Placement", "CampaignName", "cpc", "cost", "purchase_revenue", "roas", "goal_score_rate", "tier12_conversions", "med_cpc_campaign", "zone_status"],
+        "filterable_zone_status": True,
     },
     "bad_keywords": {
         "description": "Плохие ключевые запросы",
@@ -50,5 +51,6 @@ QUERIES: dict[str, dict] = {
             WHERE zone_status != 'pending'
         """,
         "sortable_columns": ["Criterion", "CampaignName", "AdGroupName", "cpc", "goal_score_rate", "avg_bid", "cpc_to_bid_ratio", "purchase_revenue", "roas", "med_roas", "tier12_conversions", "med_goal_score_rate", "zone_status"],
+        "filterable_zone_status": True,
     },
 }
