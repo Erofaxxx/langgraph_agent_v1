@@ -10,48 +10,45 @@ Named ClickHouse queries for GET /api/tables/{query_name}.
 """
 
 QUERIES: dict[str, dict] = {
-    "top_campaigns": {
-        "description": "Топ кампании по расходу",
-        "sql": """
-            SELECT
-                campaign_id,
-                campaign_name,
-                sum(clicks)      AS clicks,
-                sum(impressions) AS impressions,
-                sum(spend)       AS spend,
-                round(sum(spend) / nullIf(sum(clicks), 0), 4) AS cpc
-            FROM campaigns
-            GROUP BY campaign_id, campaign_name
-        """,
-        "sortable_columns": ["clicks", "impressions", "spend", "cpc", "campaign_name"],
-    },
-    "daily_stats": {
-        "description": "Статистика по дням (последние 30 дней)",
-        "sql": """
-            SELECT
-                toDate(event_time) AS date,
-                sum(clicks)        AS clicks,
-                sum(impressions)   AS impressions,
-                sum(spend)         AS spend
-            FROM events
-            WHERE event_time >= today() - 30
-            GROUP BY date
-        """,
-        "sortable_columns": ["date", "clicks", "impressions", "spend"],
-    },
     "bad_placements": {
-        "description": "Плохие площадки (zone_status = red)",
+        "description": "Плохие площадки",
         "sql": """
             SELECT
                 `Placement`,
                 `CampaignName`,
-                cost,
                 cpc,
-                purchase_revenue AS purchaseRevenue,
-                roas
-            FROM ym_sanok.bad_placements_v2
-            WHERE zone_status = 'red'
+                cost,
+                purchase_revenue,
+                roas,
+                goal_score_rate,
+                tier12_conversions,
+                med_cpc_campaign,
+                zone_status
+            FROM bad_placements_v3
+            WHERE zone_status != 'pending' OR zone_status IS NULL
         """,
-        "sortable_columns": ["Placement", "CampaignName", "cost", "cpc", "purchaseRevenue", "roas"],
+        "sortable_columns": ["Placement", "CampaignName", "cpc", "cost", "purchase_revenue", "roas", "goal_score_rate", "tier12_conversions", "med_cpc_campaign", "zone_status"],
+    },
+    "bad_keywords": {
+        "description": "Плохие ключевые запросы",
+        "sql": """
+            SELECT
+                `Criterion`,
+                `CampaignName`,
+                `AdGroupName`,
+                cpc,
+                goal_score_rate,
+                avg_bid,
+                cpc_to_bid_ratio,
+                purchase_revenue,
+                roas,
+                med_roas,
+                tier12_conversions,
+                med_goal_score_rate,
+                zone_status
+            FROM bad_keywords_v1
+            WHERE zone_status != 'pending'
+        """,
+        "sortable_columns": ["Criterion", "CampaignName", "AdGroupName", "cpc", "goal_score_rate", "avg_bid", "cpc_to_bid_ratio", "purchase_revenue", "roas", "med_roas", "tier12_conversions", "med_goal_score_rate", "zone_status"],
     },
 }
