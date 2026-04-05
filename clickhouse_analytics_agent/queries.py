@@ -43,13 +43,13 @@ QUERIES: dict[str, dict] = {
         "description": "Плохие площадки (zone_status = red)",
         "sql": """
             SELECT
-                Placement,
-                CampaignName,
+                `Placement`,
+                `CampaignName`,
                 cost,
                 cpc,
                 purchase_revenue AS purchaseRevenue,
                 roas
-            FROM ym_sanok.bad_placements_v2
+            FROM bad_placements_v2
             WHERE zone_status = 'red'
         """,
         "sortable_columns": ["Placement", "CampaignName", "cost", "cpc", "purchaseRevenue", "roas"],
