@@ -653,14 +653,21 @@ async def get_table_data(
         direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
         sql += f"\nORDER BY {sort_by} {direction}"
 
+    # COUNT-запрос для total_count (без LIMIT, без ORDER BY)
+    count_sql = f"SELECT count() FROM ({sql}) AS _subq"
+
     # Лимит — защита от огромных выборок
     limit = max(1, min(limit, 1000))
     sql += f"\nLIMIT {limit}"
 
     try:
         from tools import _ch_lock, _get_ch_client
+        ch = _get_ch_client()
         with _ch_lock:
-            result = await asyncio.to_thread(_get_ch_client().execute_query, sql, limit)
+            result, count_result = await asyncio.gather(
+                asyncio.to_thread(ch.execute_query, sql, limit),
+                asyncio.to_thread(ch.execute_query, count_sql, 1),
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -673,6 +680,15 @@ async def get_table_data(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read result: {exc}")
 
+    # Извлекаем total_count из COUNT-запроса
+    total_count: Optional[int] = None
+    if count_result.get("success"):
+        try:
+            count_df = _pd.read_parquet(count_result["parquet_path"])
+            total_count = int(count_df.iloc[0, 0])
+        except Exception:
+            pass
+
     columns = df.columns.tolist()
     rows = [
         [_serialize_value(cell) for cell in row]
@@ -683,6 +699,7 @@ async def get_table_data(
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),
+        "total_count": total_count,
     }
 
 
