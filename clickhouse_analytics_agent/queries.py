@@ -48,7 +48,7 @@ QUERIES: dict[str, dict] = {
                 med_goal_score_rate,
                 zone_status
             FROM ym_sanok.bad_keywords_v1
-            WHERE zone_status != 'pending'
+            WHERE (zone_status != 'pending')
         """,
         "sortable_columns": ["Criterion", "CampaignName", "AdGroupName", "cpc", "goal_score_rate", "avg_bid", "cpc_to_bid_ratio", "purchase_revenue", "roas", "med_roas", "tier12_conversions", "med_goal_score_rate", "zone_status"],
         "filterable_zone_status": True,
