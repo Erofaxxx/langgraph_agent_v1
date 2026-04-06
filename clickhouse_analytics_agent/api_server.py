@@ -664,10 +664,9 @@ async def get_table_data(
         from tools import _ch_lock, _get_ch_client
         ch = _get_ch_client()
         with _ch_lock:
-            result, count_result = await asyncio.gather(
-                asyncio.to_thread(ch.execute_query, sql, limit),
-                asyncio.to_thread(ch.execute_query, count_sql, 1),
-            )
+            result = await asyncio.to_thread(ch.execute_query, sql, limit, False)
+        with _ch_lock:
+            count_result = await asyncio.to_thread(ch.execute_query, count_sql, 1, False)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
