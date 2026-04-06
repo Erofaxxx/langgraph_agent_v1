@@ -56,4 +56,26 @@ QUERIES: dict[str, dict] = {
         "sortable_columns": ["Criterion", "CampaignName", "AdGroupName", "cpc", "goal_score_rate", "avg_bid", "cpc_to_bid_ratio", "purchase_revenue", "roas", "med_roas", "tier12_conversions", "med_goal_score_rate", "zone_status"],
         "filterable_zone_status": True,
     },
+    "bad_queries": {
+        "description": "Плохие поисковые запросы",
+        "sql": """
+            SELECT
+                `Query`,
+                `CriterionType`,
+                `CampaignName`,
+                `TargetingCategory`,
+                `roas`,
+                `goal_score_rate`,
+                `cost`,
+                `clicks`,
+                `cpc`,
+                `bounce_rate`,
+                `zone_status`,
+                `zone_reason`
+            FROM ym_sanok.bad_queries_v3
+            WHERE (zone_status != 'pending')
+        """,
+        "sortable_columns": ["Query", "CriterionType", "CampaignName", "TargetingCategory", "roas", "goal_score_rate", "cost", "clicks", "cpc", "bounce_rate", "zone_status", "zone_reason"],
+        "filterable_zone_status": True,
+    },
 }
