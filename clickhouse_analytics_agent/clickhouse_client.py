@@ -162,7 +162,7 @@ class ClickHouseClient:
                     }
         return stats
 
-    def execute_query(self, sql: str, limit: int = 500000) -> dict:
+    def execute_query(self, sql: str, limit: int = 500000, use_cache: bool = True) -> dict:
         """
         Execute a read-only query against ClickHouse.
         1. Appends LIMIT if missing.
@@ -184,7 +184,7 @@ class ClickHouseClient:
         p = Path(parquet_path)
 
         # ── Cache hit ───────────────────────────────────────────────────────
-        if p.exists():
+        if use_cache and p.exists():
             age = time.time() - p.stat().st_mtime
             if age < TEMP_FILE_TTL_SECONDS:
                 try:
