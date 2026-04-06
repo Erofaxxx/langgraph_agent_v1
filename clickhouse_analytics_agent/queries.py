@@ -18,16 +18,19 @@ QUERIES: dict[str, dict] = {
                 `CampaignName`,
                 cpc,
                 cost,
+                clicks,
                 purchase_revenue,
                 roas,
                 goal_score_rate,
                 tier12_conversions,
                 med_cpc_campaign,
+                med_gsr_campaign,
+                med_roas_campaign,
                 zone_status
             FROM ym_sanok.bad_placements_v3
             WHERE (zone_status != 'pending' OR zone_status IS NULL)
         """,
-        "sortable_columns": ["Placement", "CampaignName", "cpc", "cost", "purchase_revenue", "roas", "goal_score_rate", "tier12_conversions", "med_cpc_campaign", "zone_status"],
+        "sortable_columns": ["Placement", "CampaignName", "cpc", "cost", "clicks", "purchase_revenue", "roas", "goal_score_rate", "tier12_conversions", "med_cpc_campaign", "med_gsr_campaign", "med_roas_campaign", "zone_status"],
         "filterable_zone_status": True,
     },
     "bad_keywords": {
