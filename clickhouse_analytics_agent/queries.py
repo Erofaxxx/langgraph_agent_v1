@@ -16,17 +16,18 @@ QUERIES: dict[str, dict] = {
             SELECT
                 `Placement`,
                 `CampaignName`,
-                cpc,
                 cost,
                 clicks,
+                cpc,
                 purchase_revenue,
                 roas,
                 goal_score_rate,
-                tier12_conversions,
-                med_cpc_campaign,
-                med_gsr_campaign,
-                med_roas_campaign,
-                zone_status
+                bounce_rate,
+                avg_cpc_campaign,
+                bench_roas_campaign,
+                bench_goal_score_rate,
+                zone_status,
+                zone_reason
             FROM ym_sanok.bad_placements_v3
             WHERE (zone_status != 'pending' OR zone_status IS NULL)
         """,
