@@ -91,6 +91,9 @@ _SKILL_TABLE_HINTS: dict[str, list[str]] = {
     "socdem_analytics": ["socdem_direct_analytics"],
     "goals_reference": ["goal_dict"],
 }
+# Mapping used for focused schema injection: when skills are activated by router,
+# we bias context toward these tables. Keep in sync with skills/_registry.py and
+# domain markdown files when adding new skills or tables.
 # Keep each remembered lesson short: enough context for correction while
 # avoiding prompt bloat in long sessions with repeated failures.
 _MAX_ERROR_LESSON_CHARS = 220
@@ -585,7 +588,10 @@ class AnalyticsAgent:
         )
 
     def _build_schema_focus_section(self, query_text: str, active_skills: list[str]) -> str:
-        """Select a focused schema subset for the current query when possible."""
+        """Select a focused schema subset (query table mentions + skill hints).
+
+        Falls back to full schema when no relevant tables are detected.
+        """
         if not self._schema_tables:
             return self.schema_section
 
@@ -616,6 +622,7 @@ class AnalyticsAgent:
 
     @staticmethod
     def _normalize_error_text(text: str, max_len: int = _MAX_ERROR_LESSON_CHARS) -> str:
+        """Normalize whitespace and truncate one lesson to fit prompt budget."""
         compact = " ".join(str(text).split())
         if len(compact) <= max_len:
             return compact
@@ -806,7 +813,7 @@ class AnalyticsAgent:
             for call in tool_calls:
                 if call.get("success") is False and call.get("error"):
                     run_error_lessons.append(
-                        f"{call.get('tool', 'unknown_tool')}: {call.get('error', '')}"
+                        f"{call.get('tool', 'tool_execution_error')}: {call.get('error', '')}"
                     )
             self._merge_error_lessons(session_id, run_error_lessons)
 
