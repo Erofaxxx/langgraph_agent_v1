@@ -641,7 +641,7 @@ class AnalyticsAgent:
             data = json.loads(row[0])
             if isinstance(data, list):
                 return [str(x) for x in data if str(x).strip()]
-        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
+        except (json.JSONDecodeError, sqlite3.Error) as exc:
             print(f"⚠️  Could not load error lessons for session {session_id}: {exc}")
         return []
 
