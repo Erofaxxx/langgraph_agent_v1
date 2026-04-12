@@ -126,6 +126,28 @@ SKILLS: dict[str, dict] = {
         ),
         "full_path": _SKILLS_DIR / "attribution.md",
     },
+    "goals_reference": {
+        "router_hint": (
+            "цель, цели, goal, goal_id, конверсия, покупка, заказ, звонок, "
+            "ecommerce, воронка, корзина, чекаут, оформление, "
+            "order_paid, order_created, checkout_started, add_to_cart, "
+            "какая цель, что означает цель, Jivo, calltouch, автоцель, "
+            "product_views, cart_visits, unique_calls"
+        ),
+        "full_path": _SKILLS_DIR / "goals_reference.md",
+    },
+    "subagent_guide": {
+        "router_hint": (
+            "ключевые слова директа, площадки, bad_keywords, bad_placements, "
+            "bad_queries, поисковые запросы, dm_direct_performance, "
+            "неэффективные ключи, минус-слова, РСЯ площадки, "
+            "скоринг клиентов, ретаргетинг, dm_active_clients_scoring, "
+            "dm_step_goal_impact, lift целей, "
+            "горячие клиенты, hot warm cold, price_tier, "
+            "кого ретаргетить, has_cart, has_checkout"
+        ),
+        "full_path": _SKILLS_DIR / "subagent_guide.md",
+    },
 }
 
 
