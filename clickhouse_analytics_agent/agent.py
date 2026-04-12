@@ -91,6 +91,7 @@ _SKILL_TABLE_HINTS: dict[str, list[str]] = {
     "socdem_analytics": ["socdem_direct_analytics"],
     "goals_reference": ["goal_dict"],
 }
+_MAX_ERROR_LESSON_CHARS = 220
 
 
 # ─── Context compression helpers ──────────────────────────────────────────────
@@ -612,7 +613,7 @@ class AnalyticsAgent:
         )
 
     @staticmethod
-    def _normalize_error_text(text: str, max_len: int = 220) -> str:
+    def _normalize_error_text(text: str, max_len: int = _MAX_ERROR_LESSON_CHARS) -> str:
         compact = " ".join(str(text).split())
         if len(compact) <= max_len:
             return compact
@@ -630,8 +631,8 @@ class AnalyticsAgent:
             data = json.loads(row[0])
             if isinstance(data, list):
                 return [str(x) for x in data if str(x).strip()]
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"⚠️  Could not load error lessons for session {session_id}: {exc}")
         return []
 
     def _save_error_lessons(self, session_id: str, lessons: list[str]) -> None:
@@ -802,7 +803,7 @@ class AnalyticsAgent:
             for call in tool_calls:
                 if call.get("success") is False and call.get("error"):
                     run_error_lessons.append(
-                        f"{call.get('tool', 'tool')}: {call.get('error', '')}"
+                        f"{call.get('tool', 'unknown_tool')}: {call.get('error', '')}"
                     )
             self._merge_error_lessons(session_id, run_error_lessons)
 
