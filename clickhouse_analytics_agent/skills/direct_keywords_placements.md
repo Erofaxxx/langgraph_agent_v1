@@ -2,12 +2,12 @@
 
 ## Таблицы
 
-### ym_sanok.bad_keywords_v1 — рейтинг ключевых фраз
+### ym_sanok.bad_keywords — рейтинг ключевых фраз
 Окно 60 дней, обновление ежедневно. Только `AdNetworkType = 'SEARCH'` и `CriterionType = 'KEYWORD'`.
 
 **Ключевые поля**: Criterion, MatchType, ad_network_type (SEARCH), CampaignId, CampaignName, AdGroupId, AdGroupName, clicks, impressions, cost, ctr, cpc, avg_bid, cpc_to_bid_ratio, purchase_revenue, roas, goal_score, goal_score_rate, tier12_conversions, goal_rate_deviation, roas_deviation, med_goal_score_rate, med_roas, bid_zone, zone_status.
 
-### ym_sanok.bad_placements_v3 — рейтинг площадок РСЯ
+### ym_sanok.bad_placements — рейтинг площадок РСЯ
 Окно 60 дней. Только `AdNetworkType = 'AD_NETWORK'`.
 
 **Ключевые поля**: Placement, CampaignId, CampaignName, cost, clicks, impressions, cpc, purchase_revenue, roas, goal_score, goal_score_rate, bounces, bounce_rate, is_recent, cpc_deviation, goal_rate_deviation, roas_deviation, avg_cpc_campaign, bench_roas_campaign, bench_goal_score_rate, zone_status, zone_reason.
@@ -26,7 +26,7 @@
 `goal_score_rate = (goal_score / clicks) × 100` — эффективность на 100 кликов.
 `tier12_conversions` — строгий счётчик: покупки + оба типа звонков (без весов).
 
-## bid_zone (только bad_keywords_v1)
+## bid_zone (только bad_keywords)
 
 | Зона | cpc_to_bid_ratio | Смысл |
 |------|-------------------|-------|
@@ -41,7 +41,7 @@
 - `roas_deviation` — аналогично по ROAS
 - Нет конверсий/выручки → принудительно -1.0
 
-## zone_status (bad_keywords_v1)
+## zone_status (bad_keywords)
 
 **pending**: cost < 300 И clicks < 20.
 
@@ -52,7 +52,7 @@
 | B (норма) | goal_dev ≥ -0.2 | goal_dev ≥ -0.5 ИЛИ roas_dev ≥ -0.2 | оба хуже |
 | A (<0.4) | goal_dev ≥ -0.3 | goal_dev ≥ -0.6 | tier12=0 И cost>500 |
 
-## zone_status (bad_placements_v3)
+## zone_status (bad_placements)
 
 **pending**: is_recent=0 ИЛИ clicks<10 ИЛИ cost<200.
 **red**: нет целей + cost>400 / CPC 3× выше среднего + нет целей / нет выручки + low GSR + cost>250.
@@ -75,7 +75,7 @@
 SELECT Criterion, MatchType, ad_network_type, CampaignName, AdGroupName,
        clicks, cost, tier12_conversions, goal_score_rate, med_goal_score_rate,
        bid_zone, zone_status
-FROM ym_sanok.bad_keywords_v1
+FROM ym_sanok.bad_keywords
 WHERE zone_status = 'red'
 ORDER BY cost DESC
 LIMIT 30
@@ -85,7 +85,7 @@ LIMIT 30
 ```sql
 SELECT Criterion, ad_network_type, CampaignName, clicks, cost, tier12_conversions,
        goal_score_rate, round(goal_rate_deviation * 100, 0) AS deviation_pct, bid_zone
-FROM ym_sanok.bad_keywords_v1
+FROM ym_sanok.bad_keywords
 WHERE zone_status = 'green' AND goal_rate_deviation > 0.3
 ORDER BY tier12_conversions DESC, goal_score_rate DESC
 ```
@@ -94,7 +94,7 @@ ORDER BY tier12_conversions DESC, goal_score_rate DESC
 ```sql
 SELECT Placement, CampaignName, cost, clicks, cpc, avg_cpc_campaign,
        goal_score, bounce_rate, zone_reason
-FROM ym_sanok.bad_placements_v3
+FROM ym_sanok.bad_placements
 WHERE zone_status = 'red'
 ORDER BY cost DESC
 LIMIT 30
@@ -104,7 +104,7 @@ LIMIT 30
 ```sql
 SELECT Placement, CampaignName, cost, clicks, roas, goal_score_rate,
        bench_goal_score_rate, zone_reason
-FROM ym_sanok.bad_placements_v3
+FROM ym_sanok.bad_placements
 WHERE zone_status = 'green'
 ORDER BY goal_score_rate DESC
 ```
@@ -112,7 +112,7 @@ ORDER BY goal_score_rate DESC
 ### Площадки с высоким bounce_rate
 ```sql
 SELECT Placement, CampaignName, clicks, bounce_rate, cost, goal_score, zone_status
-FROM ym_sanok.bad_placements_v3
+FROM ym_sanok.bad_placements
 WHERE bounce_rate > 70 AND is_recent = 1 AND clicks >= 10
 ORDER BY bounce_rate DESC
 ```
@@ -122,13 +122,13 @@ ORDER BY bounce_rate DESC
 -- Ключи
 SELECT Criterion, MatchType, ad_network_type, clicks, cost, tier12_conversions,
        goal_score_rate, bid_zone, zone_status
-FROM ym_sanok.bad_keywords_v1
+FROM ym_sanok.bad_keywords
 WHERE CampaignName ILIKE '%<название>%'
 ORDER BY cost DESC
 
 -- Площадки
 SELECT Placement, cost, clicks, roas, goal_score_rate, bounce_rate, zone_status, zone_reason
-FROM ym_sanok.bad_placements_v3
+FROM ym_sanok.bad_placements
 WHERE CampaignName ILIKE '%<название>%'
 ORDER BY cost DESC
 ```

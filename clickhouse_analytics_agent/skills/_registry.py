@@ -26,7 +26,7 @@ SKILLS: dict[str, dict] = {
     },
     "product_analytics": {
         "router_hint": (
-          "товар|продукт|топ|sku|ассортимент|выручка по товарам|dm_products3|dm_purchases|позиция|категория|штуки|количество"
+          "товар|продукт|топ|sku|ассортимент|выручка по товарам|dm_products|dm_purchases|позиция|категория|штуки|количество"
         ),
         "full_path": _SKILLS_DIR / "product_analytics.md",
     },
@@ -151,6 +151,16 @@ SKILLS: dict[str, dict] = {
             "кого ретаргетить, has_cart, has_checkout"
         ),
         "full_path": _SKILLS_DIR / "subagent_guide.md",
+    },
+    "socdem_analytics": {
+        "router_hint": (
+            "возраст аудитории, пол, гендер, доход, IncomeGrade, устройство, "
+            "мобайл vs десктоп, социодем, socdem_direct_analytics, "
+            "кто кликает, кто конвертирует, автотаргетинг vs ключи, "
+            "CriterionType, TargetingCategory, ROAS по возрасту, "
+            "сегмент аудитории Директа, Age, Gender, Device"
+        ),
+        "full_path": _SKILLS_DIR / "socdem_analytics.md",
     },
 }
 

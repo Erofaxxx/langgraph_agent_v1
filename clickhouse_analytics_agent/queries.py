@@ -28,7 +28,7 @@ QUERIES: dict[str, dict] = {
                 bench_goal_score_rate,
                 zone_status,
                 zone_reason
-            FROM ym_sanok.bad_placements_v3
+            FROM ym_sanok.bad_placements
             WHERE (zone_status != 'pending' OR zone_status IS NULL)
         """,
         "sortable_columns": ["Placement", "CampaignName", "cpc", "cost", "clicks", "purchase_revenue", "roas", "goal_score_rate", "tier12_conversions", "med_cpc_campaign", "med_gsr_campaign", "med_roas_campaign", "zone_status"],
@@ -51,7 +51,7 @@ QUERIES: dict[str, dict] = {
                 tier12_conversions,
                 med_goal_score_rate,
                 zone_status
-            FROM ym_sanok.bad_keywords_v1
+            FROM ym_sanok.bad_keywords
             WHERE (zone_status != 'pending')
         """,
         "sortable_columns": ["Criterion", "CampaignName", "AdGroupName", "cpc", "goal_score_rate", "avg_bid", "cpc_to_bid_ratio", "purchase_revenue", "roas", "med_roas", "tier12_conversions", "med_goal_score_rate", "zone_status"],
@@ -73,7 +73,7 @@ QUERIES: dict[str, dict] = {
                 `bounce_rate`,
                 `zone_status`,
                 `zone_reason`
-            FROM ym_sanok.bad_queries_v3
+            FROM ym_sanok.bad_queries
             WHERE (zone_status != 'pending')
         """,
         "sortable_columns": ["Query", "CriterionType", "CampaignName", "TargetingCategory", "roas", "goal_score_rate", "cost", "clicks", "cpc", "bounce_rate", "zone_status", "zone_reason"],

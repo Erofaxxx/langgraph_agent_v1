@@ -20,9 +20,9 @@ def ask_direct_optimizer(query: str) -> tuple[str, list[str]]:
     Делегировать вопрос подагенту оптимизации Яндекс Директа.
 
     Подагент работает с таблицами:
-    • bad_keywords_v1 — ежедневный рейтинг ключевых фраз (zone_status, bid_zone, goal_score)
-    • bad_placements_v3 — рейтинг площадок РСЯ (zone_status, bounce_rate, CPC-отклонения)
-    • bad_queries_v3 — рейтинг поисковых запросов (zone_status, is_chronic, автотаргетинг)
+    • bad_keywords — ежедневный рейтинг ключевых фраз (zone_status, bid_zone, goal_score)
+    • bad_placements — рейтинг площадок РСЯ (zone_status, bounce_rate, CPC-отклонения)
+    • bad_queries — рейтинг поисковых запросов (zone_status, is_chronic, автотаргетинг)
     • dm_direct_performance — статистика Директа по кампаниям (расходы, клики, заказы, выручка, ROAS)
 
     Используй когда вопрос касается:

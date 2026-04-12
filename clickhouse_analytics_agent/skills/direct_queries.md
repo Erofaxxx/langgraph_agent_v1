@@ -1,8 +1,8 @@
 # Анализ поисковых запросов Директа
 
-## Таблица ym_sanok.bad_queries_v3
+## Таблица ym_sanok.bad_queries
 
-Рейтинг реальных поисковых запросов пользователей (search terms). В отличие от bad_keywords_v1 (фразы, которые добавили мы), здесь — запросы, которые Яндекс сматчил с нашими ключами. Окно **180 дней** (больше чем у keywords/placements). Обновление ежедневно.
+Рейтинг реальных поисковых запросов пользователей (search terms). В отличие от bad_keywords (фразы, которые добавили мы), здесь — запросы, которые Яндекс сматчил с нашими ключами. Окно **180 дней** (больше чем у keywords/placements). Обновление ежедневно.
 
 **Ключевые поля**: Query, CriterionType (KEYWORD/AUTOTARGETING), TargetingCategory, CampaignId, CampaignName, matched_keyword, clicks, impressions, cost, ctr, cpc, bounce_rate, days_active, is_chronic, is_recent, purchase_revenue, roas, goal_score, goal_score_rate, goal_rate_deviation, roas_deviation, bench_roas, bench_goal_score, zone_status, zone_reason.
 
@@ -11,7 +11,7 @@
 ### goal_score — расширенный (20 целей vs 10 у keywords)
 Включает дополнительные цели: Оформление заказа, Заполнил/Отправил контакты, Добавление в корзину, Просмотр товара, и др.
 
-`goal_score_rate = goal_score / clicks` (без ×100, в отличие от bad_keywords_v1).
+`goal_score_rate = goal_score / clicks` (без ×100, в отличие от bad_keywords).
 
 ### is_chronic и is_recent
 - `is_recent = 1` — активен в последние 20 дней
@@ -43,7 +43,7 @@
 ```sql
 SELECT Query, matched_keyword, CampaignName,
        clicks, cost, bounce_rate, goal_score, days_active, is_chronic, zone_reason
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE zone_status = 'red'
 ORDER BY cost DESC
 LIMIT 30
@@ -53,7 +53,7 @@ LIMIT 30
 ```sql
 SELECT Query, matched_keyword, CampaignName,
        days_active, clicks, cost, goal_score, bounce_rate, zone_status
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE is_chronic = 1 AND goal_score = 0 AND is_recent = 1
 ORDER BY cost DESC
 ```
@@ -63,7 +63,7 @@ ORDER BY cost DESC
 SELECT Query, matched_keyword, CampaignName,
        clicks, cost, roas, goal_score, goal_score_rate,
        round(goal_rate_deviation * 100, 0) AS deviation_pct, zone_reason
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE zone_status = 'green'
 ORDER BY goal_score DESC
 ```
@@ -72,7 +72,7 @@ ORDER BY goal_score DESC
 ```sql
 SELECT Query, TargetingCategory, CampaignName,
        clicks, cost, bounce_rate, goal_score, zone_status, zone_reason
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE CriterionType = 'AUTOTARGETING' AND is_recent = 1
 ORDER BY cost DESC
 ```
@@ -80,7 +80,7 @@ ORDER BY cost DESC
 ### Запросы по ключу — что реально ищут
 ```sql
 SELECT Query, clicks, cost, bounce_rate, goal_score, zone_status
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE matched_keyword ILIKE '%<ключ>%'
 ORDER BY cost DESC
 ```
@@ -89,7 +89,7 @@ ORDER BY cost DESC
 ```sql
 SELECT zone_status, count() AS queries, sum(cost) AS total_cost,
        sum(goal_score) AS total_gs, round(avg(bounce_rate), 1) AS avg_bounce
-FROM ym_sanok.bad_queries_v3
+FROM ym_sanok.bad_queries
 WHERE CampaignName ILIKE '%<название>%' AND is_recent = 1
 GROUP BY zone_status
 ORDER BY total_cost DESC

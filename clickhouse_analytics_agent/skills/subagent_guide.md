@@ -4,7 +4,7 @@
 
 ## ask_direct_optimizer
 Вопросы про **Яндекс Директ**: неэффективные ключевые слова, площадки РСЯ, поисковые запросы, минус-слова, отчёт по кампаниям Директа, SEARCH vs РСЯ, zone_status, is_chronic.
-Таблицы: `bad_keywords_v1`, `bad_placements_v3`, `bad_queries_v3`, `dm_direct_performance`.
+Таблицы: `bad_keywords`, `bad_placements`, `bad_queries`, `dm_direct_performance`.
 
 ## ask_scoring_agent
 Вопросы про **скоринг и ретаргетинг**: горячие/тёплые/холодные клиенты, кого ретаргетить, lift целей по шагам, ценовой тир (кто смотрит дорогие товары), has_cart/has_checkout сигналы.

@@ -102,22 +102,59 @@
                       └─ **Ecommerce: покупка (3000178943)** → order_paid ← ФИНАЛЬНЫЙ KPI
 ```
 
-## Таблица goal_dict — словарь целей
+## Таблица goal_dict — словарь целей (65 целей)
 
-Справочник для расшифровки `goal_id` → `goal_name`. Полезен при JOIN с таблицами, где goal_id хранится числом (например, `campaigns_settings.strategy_search_goal_id`).
+Справочник `goal_id` → `goal_name` + `goal_category` + `goal_trigger`. Статическая таблица, обновляется вручную.
+
+**Структура:** `goal_id` (UInt64), `goal_name` (String), `goal_category` (LowCardinality), `goal_trigger` (String).
+
+### Категории целей
+
+| Категория | Кол-во | Описание |
+|-----------|--------|----------|
+| `транзакция` | 7 | Покупка, заказ, предоплата/постоплата, доставка, отмена |
+| `воронка` | 12 | Просмотр товара → корзина → чекаут |
+| `звонки` | 4 | Calltouch: уникальные, целевые |
+| `категория` | 19 | Категорийные страницы (ванны, унитазы, смесители) |
+| `jivo` | 7 | Онлайн-чат Jivo |
+| `автоцель` | 10 | Клик по телефону, email, формы, поиск |
+| `прочее` | 6 | Контакты, акции, шумовые |
+
+### Где goal_id используется в других таблицах
+
+| Таблица | Поле | Тип JOIN |
+|---------|------|----------|
+| `campaigns_settings` | `strategy_search_goal_id` | `ON s.strategy_search_goal_id = toInt64(g.goal_id)` |
+| `campaigns_settings` | `priority_goal_ids` | `arrayJoin` + JOIN |
+| `dm_step_goal_impact` | `goal_id` | Прямой JOIN |
+| `dm_active_clients_scoring` | `recommended_goal_id` | Прямой JOIN |
+| `socdem_direct_analytics` | `MacroConversions` | Сумма 9 целей (см. ниже) |
+
+### SQL-шаблоны
 
 ```sql
 -- Расшифровать конкретный goal_id
-SELECT goal_id, goal_name FROM ym_sanok.goal_dict WHERE goal_id = 3000178943;
+SELECT goal_id, goal_name, goal_category, goal_trigger
+FROM ym_sanok.goal_dict WHERE goal_id = 3000178943;
 
--- Все цели в словаре
-SELECT goal_id, goal_name FROM ym_sanok.goal_dict ORDER BY goal_id;
+-- Все цели категории
+SELECT goal_id, goal_name, goal_trigger
+FROM ym_sanok.goal_dict WHERE goal_category = 'воронка' ORDER BY goal_id;
 
--- JOIN: какая цель оптимизации у кампании
-SELECT cs.campaign_name, g.goal_name
-FROM ym_sanok.campaigns_settings FINAL cs
-LEFT JOIN ym_sanok.goal_dict g ON toUInt64(cs.strategy_search_goal_id) = g.goal_id
-WHERE cs.state = 'ON' AND cs.strategy_search_goal_id IS NOT NULL;
+-- Цели автостратегии кампании
+SELECT s.campaign_name, s.strategy_search_goal_id,
+       g.goal_name, g.goal_category
+FROM ym_sanok.campaigns_settings FINAL s
+LEFT JOIN ym_sanok.goal_dict g ON s.strategy_search_goal_id = toInt64(g.goal_id)
+WHERE s.state = 'ON' AND s.strategy_search_goal_id IS NOT NULL;
+
+-- Приоритетные цели кампании с расшифровкой
+SELECT s.campaign_name, gid AS goal_id, g.goal_name, gval AS goal_value
+FROM ym_sanok.campaigns_settings FINAL s
+ARRAY JOIN priority_goal_ids AS gid, priority_goal_values AS gval
+LEFT JOIN ym_sanok.goal_dict g ON gid = toInt64(g.goal_id)
+WHERE length(s.priority_goal_ids) > 0
+ORDER BY s.campaign_id, gval DESC;
 ```
 
 ---

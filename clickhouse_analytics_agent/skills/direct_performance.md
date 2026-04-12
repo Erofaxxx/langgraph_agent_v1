@@ -288,13 +288,33 @@ FROM ym_sanok.ads_settings FINAL
 WHERE state = 'ON' AND (title ILIKE '%акция%' OR text ILIKE '%акция%');
 ```
 
-### campaign_dict — словарь кампаний
+### campaign_dict — словарь UTM-кампаний (транслит → русский)
 
-Справочник для расшифровки `campaign_id` → название.
+Переводит `utm_campaign` из латиницы (как записывает Директ) в кириллицу. 28 записей.
+**Не путать с campaigns_settings** — campaign_dict работает с UTM-метками из визитов, campaigns_settings — с настройками кампаний Директа.
+
+Связь: `campaign_dict.utm_campaign` матчится с `dm_traffic_performance.utm_campaign`, `dm_orders.utm_campaign_last/first`, `dm_conversion_paths.campaigns_path[]`, `dm_campaign_funnel.utm_campaign`.
 
 ```sql
-SELECT campaign_id, campaign_name FROM ym_sanok.campaign_dict
-WHERE campaign_id = <id>;
+-- Перевод UTM-кампании
+SELECT utm_campaign, campaign_name FROM ym_sanok.campaign_dict
+WHERE utm_campaign = 'Poisk_|_Brend_|_Moskva_i_oblast';
+
+-- Трафик с читаемыми названиями
+SELECT coalesce(nullIf(d.campaign_name, ''), t.utm_campaign) AS campaign,
+       sum(t.visits) AS visits, round(sum(t.revenue), 0) AS revenue
+FROM ym_sanok.dm_traffic_performance t
+LEFT JOIN ym_sanok.campaign_dict d ON t.utm_campaign = d.utm_campaign
+WHERE t.utm_campaign != ''
+GROUP BY campaign ORDER BY revenue DESC;
+
+-- Заказы с расшифровкой last-touch кампании
+SELECT coalesce(nullIf(d.campaign_name, ''), o.utm_campaign_last) AS campaign,
+       count() AS orders, round(sum(o.order_revenue), 0) AS revenue
+FROM ym_sanok.dm_orders o
+LEFT JOIN ym_sanok.campaign_dict d ON o.utm_campaign_last = d.utm_campaign
+WHERE o.utm_campaign_last != ''
+GROUP BY campaign ORDER BY revenue DESC;
 ```
 
 ### goal_dict — словарь целей
