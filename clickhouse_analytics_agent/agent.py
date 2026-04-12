@@ -91,6 +91,8 @@ _SKILL_TABLE_HINTS: dict[str, list[str]] = {
     "socdem_analytics": ["socdem_direct_analytics"],
     "goals_reference": ["goal_dict"],
 }
+# Keep each remembered lesson short: enough context for correction while
+# avoiding prompt bloat in long sessions with repeated failures.
 _MAX_ERROR_LESSON_CHARS = 220
 
 
@@ -646,8 +648,8 @@ class AnalyticsAgent:
                 (session_id, data, time.time()),
             )
             self._conn.commit()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"⚠️  Could not save error lessons for session {session_id}: {exc}")
 
     def _merge_error_lessons(self, session_id: str, new_lessons: list[str]) -> str:
         """Merge and persist lessons; return markdown bullet list for prompt injection."""
