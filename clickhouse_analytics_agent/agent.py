@@ -80,6 +80,9 @@ class AgentState(TypedDict):
     error_memory: str                         # lessons learned по ошибкам в сессии
 
 
+# Mapping used for focused schema injection: when skills are activated by router,
+# we bias context toward these tables. Keep in sync with skills/_registry.py and
+# domain markdown files when adding new skills or tables.
 _SKILL_TABLE_HINTS: dict[str, list[str]] = {
     "product_analytics": ["dm_products", "dm_purchases", "dm_orders"],
     "campaign_analysis": ["dm_traffic_performance", "dm_orders", "dm_direct_performance"],
@@ -91,9 +94,6 @@ _SKILL_TABLE_HINTS: dict[str, list[str]] = {
     "socdem_analytics": ["socdem_direct_analytics"],
     "goals_reference": ["goal_dict"],
 }
-# Mapping used for focused schema injection: when skills are activated by router,
-# we bias context toward these tables. Keep in sync with skills/_registry.py and
-# domain markdown files when adding new skills or tables.
 # Keep each remembered lesson short: enough context for correction while
 # avoiding prompt bloat in long sessions with repeated failures.
 _MAX_ERROR_LESSON_CHARS = 220
@@ -811,7 +811,7 @@ class AnalyticsAgent:
             tool_calls = self._extract_tool_calls(messages)
             run_error_lessons: list[str] = []
             for call in tool_calls:
-                if call.get("success") is False and call.get("error"):
+                if not call.get("success") and call.get("error"):
                     run_error_lessons.append(
                         f"{call.get('tool', 'tool_execution_error')}: {call.get('error', '')}"
                     )
