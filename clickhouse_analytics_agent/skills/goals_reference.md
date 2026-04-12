@@ -102,6 +102,26 @@
                       └─ **Ecommerce: покупка (3000178943)** → order_paid ← ФИНАЛЬНЫЙ KPI
 ```
 
+## Таблица goal_dict — словарь целей
+
+Справочник для расшифровки `goal_id` → `goal_name`. Полезен при JOIN с таблицами, где goal_id хранится числом (например, `campaigns_settings.strategy_search_goal_id`).
+
+```sql
+-- Расшифровать конкретный goal_id
+SELECT goal_id, goal_name FROM ym_sanok.goal_dict WHERE goal_id = 3000178943;
+
+-- Все цели в словаре
+SELECT goal_id, goal_name FROM ym_sanok.goal_dict ORDER BY goal_id;
+
+-- JOIN: какая цель оптимизации у кампании
+SELECT cs.campaign_name, g.goal_name
+FROM ym_sanok.campaigns_settings FINAL cs
+LEFT JOIN ym_sanok.goal_dict g ON toUInt64(cs.strategy_search_goal_id) = g.goal_id
+WHERE cs.state = 'ON' AND cs.strategy_search_goal_id IS NOT NULL;
+```
+
+---
+
 ## Готовые агрегаты для SQL (dm_direct_performance)
 
 ```sql

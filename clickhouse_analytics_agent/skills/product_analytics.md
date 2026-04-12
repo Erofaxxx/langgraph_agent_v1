@@ -1,7 +1,7 @@
 # Скилл: Товарная аналитика
 
 Активируется при вопросах про: товары, продукты, SKU, ассортимент, категории, штуки,
-количество, топ товаров, выручка по товарам, позиции в заказе, dm_orders, dm_purchases, dm_products.
+количество, топ товаров, выручка по товарам, позиции в заказе, dm_orders, dm_purchases, dm_products3.
 
 ---
 
@@ -10,12 +10,12 @@
 ```
 dm_orders    — 1 строка = 1 заказ      (выручка, атрибуция, device, city)
 dm_purchases — 1 строка = 1 позиция    (товар, количество, цена)
-dm_products  — 1 строка = 1 товар      (агрегат: все метрики + тренды 30 дней)
+dm_products3  — 1 строка = 1 товар      (агрегат: все метрики + тренды 30 дней)
 ```
 
 **Связи:**
 - `dm_purchases.order_id = dm_orders.order_id`
-- `dm_products.product_id = dm_purchases.product_id`
+- `dm_products3.product_id = dm_purchases.product_id`
 
 ### ⚠️ Критическое правило
 **Никогда не делать ARRAY JOIN на таблице `visits` для товарных запросов.**
@@ -28,17 +28,17 @@ dm_products  — 1 строка = 1 товар      (агрегат: все ме
 
 | Вопрос | Витрина |
 |--------|---------|
-| Топ товаров по выручке / штукам / заказам | `dm_products` (без JOIN, быстро) |
-| Растёт или падает конкретный товар (тренд 30д) | `dm_products` |
-| Товары, которые давно не продавались | `dm_products` (days_since_last_sale) |
-| Ценовой разброс по товару | `dm_products` (min/max/avg_unit_price) |
-| Лояльные клиенты товара, повторные покупки | `dm_products` (repeat_buyers, unique_clients) |
+| Топ товаров по выручке / штукам / заказам | `dm_products3` (без JOIN, быстро) |
+| Растёт или падает конкретный товар (тренд 30д) | `dm_products3` |
+| Товары, которые давно не продавались | `dm_products3` (days_since_last_sale) |
+| Ценовой разброс по товару | `dm_products3` (min/max/avg_unit_price) |
+| Лояльные клиенты товара, повторные покупки | `dm_products3` (repeat_buyers, unique_clients) |
 | Состав конкретного заказа | `dm_purchases WHERE order_id = '...'` |
 | Какие товары покупают через канал X | `dm_purchases JOIN dm_orders ON order_id` |
 | Топ товаров по источнику трафика | `dm_purchases JOIN dm_orders ON order_id` |
 | Средний чек, выручка, атрибуция без товаров | `dm_orders` (без JOIN) |
 
-**Правило:** `dm_products` — для рейтингов и агрегатов. `dm_purchases` — для детализации и JOIN с `dm_orders`.
+**Правило:** `dm_products3` — для рейтингов и агрегатов. `dm_purchases` — для детализации и JOIN с `dm_orders`.
 
 ---
 
@@ -81,7 +81,7 @@ dm_products  — 1 строка = 1 товар      (агрегат: все ме
 
 ---
 
-## Поля dm_products
+## Поля dm_products3
 
 Агрегат — одна строка на товар. Обновляется ежедневно в 04:00.
 
@@ -131,7 +131,7 @@ SELECT
     round((revenue_last_30d - revenue_prev_30d)
           / nullIf(revenue_prev_30d, 0) * 100, 1)                   AS growth_pct,
     days_since_last_sale
-FROM dm_products
+FROM dm_products3
 ORDER BY total_revenue DESC
 LIMIT 20
 ```
@@ -174,7 +174,7 @@ SELECT
     days_since_last_sale,
     total_orders,
     round(total_revenue)                 AS total_revenue
-FROM dm_products
+FROM dm_products3
 WHERE days_since_last_sale > 60
 ORDER BY total_revenue DESC
 LIMIT 30
@@ -188,7 +188,7 @@ SELECT
     repeat_buyers,
     round(repeat_buyers / unique_clients * 100, 1)  AS loyalty_pct,
     round(total_revenue)                             AS total_revenue
-FROM dm_products
+FROM dm_products3
 WHERE unique_clients >= 3
 ORDER BY loyalty_pct DESC
 LIMIT 20
@@ -204,7 +204,7 @@ SELECT
     round((max_unit_price - min_unit_price)
           / nullIf(min_unit_price, 0) * 100, 0)     AS spread_pct,
     total_orders
-FROM dm_products
+FROM dm_products3
 WHERE total_orders > 1
 ORDER BY spread_pct DESC
 LIMIT 20
@@ -226,9 +226,9 @@ LIMIT 20
 Витрины покрывают данные с 2025-09-01.
 Исторические данные до этой даты недоступны.
 
-### dm_products обновляется последней
-Расписание: dm_orders 03:00 → dm_purchases 03:30 → dm_products 04:00.
-Данные в dm_products актуальны на 04:00 текущего дня.
+### dm_products3 обновляется последней
+Расписание: dm_orders 03:00 → dm_purchases 03:30 → dm_products3 04:00.
+Данные в dm_products3 актуальны на 04:00 текущего дня.
 
 ### Выручка по товарам vs выручка по заказам
 `sum(dm_purchases.product_revenue)` ≈ `sum(dm_orders.order_revenue)`.
