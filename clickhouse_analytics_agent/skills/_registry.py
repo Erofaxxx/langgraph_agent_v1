@@ -61,7 +61,11 @@ SKILLS: dict[str, dict] = {
             "стоимость заказа, CPS, CPC, эффективность кампаний Директа, "
             "атрибутированная выручка, прибыльные кампании, убыточные кампании, "
             "dm_direct_enriched, dm_direct_by_adgroup, куда идёт бюджет, "
-            "сколько тратим, сколько зарабатываем, окупается ли реклама"
+            "сколько тратим, сколько зарабатываем, окупается ли реклама, "
+            "campaigns_settings, adgroups_settings, ads_settings, campaign_dict, "
+            "настройки кампании, стратегия, автостратегия, CRR, бюджет, баланс, "
+            "объявления, тексты объявлений, модерация, группы объявлений, "
+            "автотаргетинг, фид, ключевые фразы группы"
         ),
         "full_path": _SKILLS_DIR / "direct_performance.md",
     },
@@ -78,8 +82,8 @@ SKILLS: dict[str, dict] = {
         "router_hint": (
             "регион, город, гео, география, геотаргетинг, по регионам, по городам, "
             "территория, где покупают, ROAS по городам, расходы по регионам, "
-            "dm_direct_by_geo, Москва vs регионы, региональная эффективность, "
-            "какие города приносят заказы, geo_city_map"
+            "dm_direct_by_geo, dm_direct_by_region, Москва vs регионы, региональная эффективность, "
+            "какие города приносят заказы, geo_city_map, location_name, воронка по регионам"
         ),
         "full_path": _SKILLS_DIR / "geo_performance.md",
     },
@@ -125,6 +129,38 @@ SKILLS: dict[str, dict] = {
             "какие каналы закрывают сделку, какие каналы открывают, attribution share"
         ),
         "full_path": _SKILLS_DIR / "attribution.md",
+    },
+    "goals_reference": {
+        "router_hint": (
+            "цель, цели, goal, goal_id, goal_dict, конверсия, покупка, заказ, звонок, "
+            "ecommerce, воронка, корзина, чекаут, оформление, "
+            "order_paid, order_created, checkout_started, add_to_cart, "
+            "какая цель, что означает цель, Jivo, calltouch, автоцель, "
+            "product_views, cart_visits, unique_calls, расшифровка цели"
+        ),
+        "full_path": _SKILLS_DIR / "goals_reference.md",
+    },
+    "subagent_guide": {
+        "router_hint": (
+            "ключевые слова директа, площадки, bad_keywords, bad_placements, "
+            "bad_queries, поисковые запросы, dm_direct_performance, "
+            "неэффективные ключи, минус-слова, РСЯ площадки, "
+            "скоринг клиентов, ретаргетинг, dm_active_clients_scoring, "
+            "dm_step_goal_impact, lift целей, "
+            "горячие клиенты, hot warm cold, price_tier, "
+            "кого ретаргетить, has_cart, has_checkout"
+        ),
+        "full_path": _SKILLS_DIR / "subagent_guide.md",
+    },
+    "socdem_analytics": {
+        "router_hint": (
+            "возраст аудитории, пол, гендер, доход, IncomeGrade, устройство, "
+            "мобайл vs десктоп, социодем, socdem_direct_analytics, "
+            "кто кликает, кто конвертирует, автотаргетинг vs ключи, "
+            "CriterionType, TargetingCategory, ROAS по возрасту, "
+            "сегмент аудитории Директа, Age, Gender, Device"
+        ),
+        "full_path": _SKILLS_DIR / "socdem_analytics.md",
     },
 }
 

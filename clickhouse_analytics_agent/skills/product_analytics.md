@@ -33,6 +33,9 @@ dm_products  — 1 строка = 1 товар      (агрегат: все ме
 | Товары, которые давно не продавались | `dm_products` (days_since_last_sale) |
 | Ценовой разброс по товару | `dm_products` (min/max/avg_unit_price) |
 | Лояльные клиенты товара, повторные покупки | `dm_products` (repeat_buyers, unique_clients) |
+| Конверсия просмотров в покупки | `dm_products` (total_orders / unique_viewers) |
+| Paid vs organic по товарам | `dm_products` (paid_purchases, paid_assisted_purchases) |
+| Кандидаты для ретаргетинга (много просмотров, мало покупок) | `dm_products` (unique_viewers >> total_orders) |
 | Состав конкретного заказа | `dm_purchases WHERE order_id = '...'` |
 | Какие товары покупают через канал X | `dm_purchases JOIN dm_orders ON order_id` |
 | Топ товаров по источнику трафика | `dm_purchases JOIN dm_orders ON order_id` |
@@ -83,13 +86,26 @@ dm_products  — 1 строка = 1 товар      (агрегат: все ме
 
 ## Поля dm_products
 
-Агрегат — одна строка на товар. Обновляется ежедневно в 04:00.
+Агрегат — одна строка на товар. INSERT-triggered MV (пересобирается при INSERT в `visits`).
+81 258 товаров, из них 5 422 с продажами. Используется в `dm_active_clients_scoring` для `price_tier`.
 
 | Поле | Описание |
 |------|----------|
+| **Идентификация** | |
 | `product_id` | ID товара — первичный ключ |
 | `product_name` | Последнее известное название |
-| `product_category` | Последняя известная категория |
+| `product_category` | Категория (формат: «Раздел/Подраздел») |
+| **Просмотры** | |
+| `total_views` | Общее число просмотров товара |
+| `unique_viewers` | Уникальные клиенты, просмотревшие товар |
+| `first_view_date` | Дата первого просмотра |
+| `last_view_date` | Дата последнего просмотра |
+| **Paid-метрики** | |
+| `paid_views` | Просмотры в сессиях с DirectClickOrder > 0 |
+| `paid_assisted_views` | Просмотры в органике, если клиент кликал рекламу за 30 дней |
+| `paid_purchases` | Покупки в рекламных сессиях |
+| `paid_assisted_purchases` | Покупки с assisted-атрибуцией (реклама → 30 дней → органическая покупка) |
+| **Продажи** | |
 | `total_orders` | Уникальных заказов за всё время |
 | `total_quantity` | Всего штук продано |
 | `total_revenue` | Выручка за всё время |
@@ -100,19 +116,23 @@ dm_products  — 1 строка = 1 товар      (агрегат: все ме
 | `repeat_buyers` | Клиенты купившие товар более 1 раза |
 | `first_sale_date` | Дата первой продажи |
 | `last_sale_date` | Дата последней продажи |
-| `days_since_last_sale` | Дней с последней продажи (актуально на дату обновления) |
+| `days_since_last_sale` | Дней с последней продажи (от today()) |
 | `avg_order_value` | Средний чек заказа, когда товар в корзине |
-| `pct_solo_orders` | % заказов, где товар был единственным |
+| `pct_solo_orders` | % заказов, где товар был единственным (медиана = 100%) |
+| **Динамика 30 дней** | |
 | `orders_last_30d` | Заказов за последние 30 дней |
 | `revenue_last_30d` | Выручка за последние 30 дней |
 | `orders_prev_30d` | Заказов за предыдущие 30 дней (для тренда) |
 | `revenue_prev_30d` | Выручка за предыдущие 30 дней (для тренда) |
 
+### Ценовое распределение (товары с продажами)
+P25 = 7 418 руб, медиана = 13 614 руб, P75 = 24 485 руб. Эти квантили используются для `price_tier` в `dm_active_clients_scoring`: low < 7 500, medium 7 500–25 000, high >= 25 000.
+
 ### Производные метрики (агент считает на лету, не хранятся)
 - `repeat_buyers / unique_clients * 100` → % лояльных клиентов
 - `(revenue_last_30d - revenue_prev_30d) / revenue_prev_30d * 100` → рост выручки %
-- `total_orders / unique_clients` → среднее заказов на клиента
-- `(max_unit_price - min_unit_price) / min_unit_price * 100` → ценовой разброс %
+- `total_orders / unique_viewers * 100` → конверсия просмотр → покупка
+- `(paid_purchases + paid_assisted_purchases) / total_orders * 100` → доля paid-покупок
 
 ---
 
@@ -226,11 +246,16 @@ LIMIT 20
 Витрины покрывают данные с 2025-09-01.
 Исторические данные до этой даты недоступны.
 
-### dm_products обновляется последней
-Расписание: dm_orders 03:00 → dm_purchases 03:30 → dm_products 04:00.
-Данные в dm_products актуальны на 04:00 текущего дня.
+### dm_products — INSERT-triggered MV
+Пересобирается при каждом INSERT в `visits`. Для корректных агрегатов по product_id группировать в финальном запросе.
+
+### avg_unit_price = 0 для товаров без продаж
+Только товары с историей продаж (5 422 из 81 258) имеют цену. В `dm_active_clients_scoring` клиенты, смотрящие только непроданные товары, получают `price_tier = 'unknown'`.
 
 ### Выручка по товарам vs выручка по заказам
 `sum(dm_purchases.product_revenue)` ≈ `sum(dm_orders.order_revenue)`.
 Незначительная разница (< 0.1%) — погрешность округления Float64.
 Для итоговой выручки использовать `dm_orders` как источник истины.
+
+### paid_ad_cost = 0
+Источник стоимости кликов удалён из БД. Поле зарезервировано.

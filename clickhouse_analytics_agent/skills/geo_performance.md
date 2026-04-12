@@ -21,6 +21,7 @@
 | Задача | Таблица |
 |--------|---------|
 | ROAS, CPS, заказы по регионам (интеграция с Метрикой) | `dm_direct_by_geo` |
+| Ecommerce-воронка по регионам (order_paid, cart_visits, add_to_cart) | `dm_direct_by_region` |
 | Расходы, CTR, клики по городам (только Директ, на русском) | `direct_campaigns` GROUP BY LocationOfPresenceName |
 | Перевод русских → английских названий городов | `geo_city_map` / `dict_geo_ru_to_en` |
 
@@ -168,6 +169,70 @@ WHERE Date >= today() - 30
     )
 GROUP BY Date, region
 ORDER BY Date, cost DESC
+```
+
+---
+
+## dm_direct_by_region — Директ по регионам (ecommerce-воронка)
+
+Витрина с региональной гранулярностью из Direct API. Дополнение к `dm_direct_by_geo` — те же метрики, что в `dm_direct_performance`, плюс `location_id` / `location_name`.
+
+> `location_name` — регион **фактического нахождения** пользователя в момент клика, не регион таргетинга.
+
+**Движок:** MergeTree (не ReplacingMergeTree — `FINAL` не нужен).
+**История:** с 2025-09-01.
+
+### Поля dm_direct_by_region
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `date` | Date | Дата |
+| `campaign_id` | UInt64 | ID кампании |
+| `campaign_name` | String | Название |
+| `adgroup_id` | UInt64 | ID группы |
+| `adgroup_name` | String | Название группы |
+| `ad_network_type` | String | SEARCH / AD_NETWORK |
+| `location_id` | UInt64 | Яндекс geo ID |
+| `location_name` | String | Название региона (русский) |
+| `impressions` / `clicks` / `cost` | | Трафик |
+| `purchase_revenue` / `purchase_profit` | Float64 | Выручка / прибыль |
+| `cart_visits` / `product_views` / `add_to_cart` | UInt64 | Ecommerce-воронка |
+| `checkout_started` / `order_created` / `order_paid` | UInt64 | Воронка заказов |
+| `unique_calls` | UInt64 | Уникальные звонки |
+
+### Когда dm_direct_by_region лучше dm_direct_by_geo
+
+- Нужна **ecommerce-воронка** (add_to_cart, checkout_started, order_paid) в разрезе регионов
+- Нужен `adgroup_id` / `ad_network_type` в разрезе регионов
+- Названия регионов на русском (не нужен перевод через geo_city_map)
+
+### SQL-паттерны dm_direct_by_region
+
+```sql
+-- Топ регионов по расходам с воронкой
+SELECT location_name,
+       sum(cost) AS cost, sum(clicks) AS clicks,
+       sum(add_to_cart) AS atc, sum(checkout_started) AS checkout,
+       sum(order_paid) AS orders, sum(purchase_revenue) AS revenue
+FROM ym_sanok.dm_direct_by_region
+WHERE date >= today() - 30
+GROUP BY location_name
+ORDER BY cost DESC LIMIT 20;
+
+-- ROAS по регионам
+SELECT location_name,
+       sum(purchase_revenue) / nullIf(sum(cost), 0) AS roas,
+       sum(order_paid) AS orders, sum(cost) AS cost
+FROM ym_sanok.dm_direct_by_region
+WHERE date >= today() - 30
+GROUP BY location_name
+ORDER BY roas DESC;
+
+-- Сравнение кампаний внутри региона
+SELECT campaign_name, sum(cost) AS cost, sum(order_paid) AS orders
+FROM ym_sanok.dm_direct_by_region
+WHERE location_name = 'Москва' AND date >= today() - 30
+GROUP BY campaign_name ORDER BY cost DESC;
 ```
 
 ---
