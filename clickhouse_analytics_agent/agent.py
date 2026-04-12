@@ -49,6 +49,7 @@ from langgraph.prebuilt import ToolNode
 from config import (
     ALLOWED_MODELS,
     DB_PATH,
+    ERROR_MEMORY_MAX_ITEMS,
     MAX_AGENT_ITERATIONS,
     MAX_HISTORY_TURNS,
     MAX_TOKENS,
@@ -75,6 +76,21 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]  # reducer: накопление сообщений
     active_skills: list[str]                  # имена активных skills
     skill_instructions: str                   # объединённые инструкции skills
+    schema_focus_section: str                 # релевантные таблицы под текущий запрос
+    error_memory: str                         # lessons learned по ошибкам в сессии
+
+
+_SKILL_TABLE_HINTS: dict[str, list[str]] = {
+    "product_analytics": ["dm_products", "dm_purchases", "dm_orders"],
+    "campaign_analysis": ["dm_traffic_performance", "dm_orders", "dm_direct_performance"],
+    "direct_performance": ["dm_direct_enriched", "dm_direct_by_adgroup", "dm_direct_performance"],
+    "keyword_analysis": ["direct_criteria", "direct_search_queries", "bad_keywords", "bad_queries"],
+    "geo_performance": ["dm_direct_by_geo", "dm_direct_by_region", "geo_city_map"],
+    "cohort_analysis": ["dm_client_journey", "dm_client_profile"],
+    "subagent_guide": ["bad_keywords", "bad_placements", "bad_queries", "dm_active_clients_scoring", "dm_step_goal_impact"],
+    "socdem_analytics": ["socdem_direct_analytics"],
+    "goals_reference": ["goal_dict"],
+}
 
 
 # ─── Context compression helpers ──────────────────────────────────────────────
@@ -168,7 +184,7 @@ dm_purchases не содержит utm/device/city — они только в dm
 * Язык — русский
 * Конкретика: цифры, динамика, сравнение — без воды
 * Каждое слово в выводе должно нести смысл. Никаких итоговых блоков с эмодзи, повторов, обобщений ради обобщений.
-{skill_section}"""
+{error_memory_section}{skill_section}"""
 
 
 # ─── LLM factory ──────────────────────────────────────────────────────────────
@@ -232,9 +248,18 @@ class AnalyticsAgent:
         # ── SqliteSaver checkpointer ──────────────────────────────────────
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         conn.execute("PRAGMA busy_timeout = 5000")  # wait up to 5s on lock
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_error_memory ("
+            "session_id TEXT PRIMARY KEY, "
+            "lessons_json TEXT NOT NULL, "
+            "updated_at REAL NOT NULL)"
+        )
+        conn.commit()
+        self._conn = conn
         self.memory = SqliteSaver(conn)
 
         # ── Fetch schema once at startup ──────────────────────────────────
+        self._schema_tables: list[dict] = []
         self.schema_section = self._fetch_schema_section()
 
         # ── Provider flag for prompt caching ─────────────────────────────
@@ -252,9 +277,15 @@ class AnalyticsAgent:
         def _build_messages(state: AgentState) -> list:
             messages = state.get("messages", [])
             skill_instructions = state.get("skill_instructions", "")
+            schema_focus_section = state.get("schema_focus_section", "")
+            error_memory = state.get("error_memory", "")
 
             # ── Dynamic system prompt (core + active skills) ───────────────
-            system_prompt = self._build_system_prompt(skill_instructions)
+            system_prompt = self._build_system_prompt(
+                skill_instructions=skill_instructions,
+                schema_section=schema_focus_section or self.schema_section,
+                error_memory=error_memory,
+            )
 
             # ── 1. Sliding window ──────────────────────────────────────────
             human_indices = [
@@ -506,6 +537,7 @@ class AnalyticsAgent:
         try:
             from tools import _get_ch_client
             tables = _get_ch_client().list_tables()
+            self._schema_tables = tables
             schema_block = _build_schema_block(tables)
             print(f"✅ Schema loaded: {len(tables)} table(s) embedded in system prompt")
             return (
@@ -513,6 +545,7 @@ class AnalyticsAgent:
                 + schema_block
             )
         except Exception as exc:
+            self._schema_tables = []
             print(f"⚠️  Could not fetch schema at startup: {exc}")
             return (
                 "Схема недоступна при старте. "
@@ -521,7 +554,12 @@ class AnalyticsAgent:
 
     # ─── Dynamic system prompt ─────────────────────────────────────────────────
 
-    def _build_system_prompt(self, skill_instructions: str = "") -> str:
+    def _build_system_prompt(
+        self,
+        skill_instructions: str = "",
+        schema_section: str = "",
+        error_memory: str = "",
+    ) -> str:
         """
         Build the system prompt from the core template + active skill instructions.
 
@@ -533,10 +571,98 @@ class AnalyticsAgent:
             skill_section = "\n\n---\n\n## Активные инструкции (Skills)\n\n" + skill_instructions
         else:
             skill_section = ""
+        if error_memory:
+            error_memory_section = "\n\n## Память ошибок из прошлых шагов\n\n" + error_memory + "\n\n"
+        else:
+            error_memory_section = ""
         return _SYSTEM_PROMPT_CORE.format(
-            schema_section=self.schema_section,
+            schema_section=schema_section or self.schema_section,
+            error_memory_section=error_memory_section,
             skill_section=skill_section,
         )
+
+    def _build_schema_focus_section(self, query_text: str, active_skills: list[str]) -> str:
+        """Select a focused schema subset for the current query when possible."""
+        if not self._schema_tables:
+            return self.schema_section
+
+        query_lc = query_text.lower()
+        selected: set[str] = set()
+
+        for table in self._schema_tables:
+            table_name = str(table.get("table", ""))
+            if table_name and table_name.lower() in query_lc:
+                selected.add(table_name)
+
+        for skill_name in active_skills:
+            for table_name in _SKILL_TABLE_HINTS.get(skill_name, []):
+                selected.add(table_name)
+
+        if not selected:
+            return self.schema_section
+
+        focused_tables = [t for t in self._schema_tables if t.get("table") in selected]
+        if not focused_tables:
+            return self.schema_section
+
+        return (
+            "Релевантные таблицы для текущего вопроса (фокус-контекст):\n\n"
+            + _build_schema_block(focused_tables)
+            + "\n\nЕсли нужной таблицы здесь нет — используй `list_tables` и выбери подходящую."
+        )
+
+    @staticmethod
+    def _normalize_error_text(text: str, max_len: int = 220) -> str:
+        compact = " ".join(str(text).split())
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 1] + "…"
+
+    def _load_error_lessons(self, session_id: str) -> list[str]:
+        """Load persisted error lessons for a session."""
+        try:
+            row = self._conn.execute(
+                "SELECT lessons_json FROM session_error_memory WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                return []
+            data = json.loads(row[0])
+            if isinstance(data, list):
+                return [str(x) for x in data if str(x).strip()]
+        except Exception:
+            pass
+        return []
+
+    def _save_error_lessons(self, session_id: str, lessons: list[str]) -> None:
+        """Persist error lessons for a session."""
+        try:
+            data = json.dumps(lessons[:ERROR_MEMORY_MAX_ITEMS], ensure_ascii=False)
+            self._conn.execute(
+                "INSERT INTO session_error_memory(session_id, lessons_json, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET lessons_json=excluded.lessons_json, updated_at=excluded.updated_at",
+                (session_id, data, time.time()),
+            )
+            self._conn.commit()
+        except Exception:
+            pass
+
+    def _merge_error_lessons(self, session_id: str, new_lessons: list[str]) -> str:
+        """Merge and persist lessons; return markdown bullet list for prompt injection."""
+        if not new_lessons:
+            existing = self._load_error_lessons(session_id)
+            return "\n".join(f"- {x}" for x in existing[:ERROR_MEMORY_MAX_ITEMS])
+
+        existing = self._load_error_lessons(session_id)
+        merged: list[str] = list(existing)
+        for lesson in new_lessons:
+            norm = self._normalize_error_text(lesson)
+            if norm and norm not in merged:
+                merged.append(norm)
+        merged = merged[-ERROR_MEMORY_MAX_ITEMS:]
+        self._save_error_lessons(session_id, merged)
+        return "\n".join(f"- {x}" for x in merged)
 
     # ─── Router node ───────────────────────────────────────────────────────────
 
@@ -560,7 +686,11 @@ class AnalyticsAgent:
             None,
         )
         if last_human is None:
-            return {"active_skills": [], "skill_instructions": ""}
+            return {
+                "active_skills": [],
+                "skill_instructions": "",
+                "schema_focus_section": self.schema_section,
+            }
 
         query_text = last_human.content
         if isinstance(query_text, list):
@@ -618,8 +748,13 @@ class AnalyticsAgent:
 
         active = skill_router.classify(query_text, context=context or None)
         instructions = load_skill_instructions(active)
+        schema_focus_section = self._build_schema_focus_section(query_text, active)
 
-        return {"active_skills": active, "skill_instructions": instructions}
+        return {
+            "active_skills": active,
+            "skill_instructions": instructions,
+            "schema_focus_section": schema_focus_section,
+        }
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -649,8 +784,12 @@ class AnalyticsAgent:
         }
 
         try:
+            error_memory_text = self._merge_error_lessons(session_id, [])
             result = self.graph.invoke(
-                {"messages": [HumanMessage(content=user_query)]},
+                {
+                    "messages": [HumanMessage(content=user_query)],
+                    "error_memory": error_memory_text,
+                },
                 config=config,
             )
 
@@ -659,6 +798,13 @@ class AnalyticsAgent:
             text_output = self._extract_final_text(messages)
             plots = self._extract_plots(messages)
             tool_calls = self._extract_tool_calls(messages)
+            run_error_lessons: list[str] = []
+            for call in tool_calls:
+                if call.get("success") is False and call.get("error"):
+                    run_error_lessons.append(
+                        f"{call.get('tool', 'tool')}: {call.get('error', '')}"
+                    )
+            self._merge_error_lessons(session_id, run_error_lessons)
 
             return {
                 "success": True,
@@ -673,6 +819,7 @@ class AnalyticsAgent:
 
         except Exception as exc:
             import traceback as tb
+            self._merge_error_lessons(session_id, [f"graph_invoke: {exc}"])
             # Try to salvage accumulated messages for the logger even on error
             _err_msgs = []
             try:

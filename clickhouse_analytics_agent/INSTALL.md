@@ -99,6 +99,10 @@ SERVER_URL=https://server.asktab.ru
 
 Сохраните файл: `Ctrl+O`, `Enter`, `Ctrl+X`.
 
+Примечание по кэшированию:
+- Для моделей Anthropic через OpenRouter агент использует `cache_control` + provider pinning, поэтому prompt caching сохраняется и после смены инфраструктуры.
+- SQL-результаты кэшируются локально в `temp_data/*.parquet` по хешу запроса (TTL управляется `TEMP_FILE_TTL_SECONDS`).
+
 ---
 
 ## Шаг 6. Проверка подключения к ClickHouse

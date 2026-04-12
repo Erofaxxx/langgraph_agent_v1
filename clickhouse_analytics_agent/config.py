@@ -78,3 +78,6 @@ TEMP_FILE_TTL_SECONDS: int = int(os.environ.get("TEMP_FILE_TTL_SECONDS", "3600")
 # How many past HumanMessage turns to keep in context (sliding window).
 # Older turns are dropped; current turn is always kept in full.
 MAX_HISTORY_TURNS: int = int(os.environ.get("MAX_HISTORY_TURNS", "10"))
+
+# How many "lessons learned" from previous errors to keep per session.
+ERROR_MEMORY_MAX_ITEMS: int = int(os.environ.get("ERROR_MEMORY_MAX_ITEMS", "5"))
