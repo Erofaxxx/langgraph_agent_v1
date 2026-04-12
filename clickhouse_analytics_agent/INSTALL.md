@@ -101,6 +101,7 @@ SERVER_URL=https://server.asktab.ru
 
 Примечание по кэшированию:
 - Для моделей Anthropic через OpenRouter агент использует `cache_control` + provider pinning, поэтому prompt caching сохраняется при обычном redeploy/масштабировании сервиса (пока провайдер и модель не меняются).
+- При смене модели или провайдера (например, Anthropic → DeepSeek) prompt cache считается новым/пустым для новой цепочки вызовов.
 - SQL-результаты кэшируются локально в `temp_data/*.parquet` по хешу запроса (TTL управляется `TEMP_FILE_TTL_SECONDS`).
 
 ---

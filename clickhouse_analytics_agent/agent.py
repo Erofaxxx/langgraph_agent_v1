@@ -619,7 +619,8 @@ class AnalyticsAgent:
         compact = " ".join(str(text).split())
         if len(compact) <= max_len:
             return compact
-        return compact[: max_len - 1] + "…"
+        ellipsis = "…"
+        return compact[: max_len - len(ellipsis)] + ellipsis
 
     def _load_error_lessons(self, session_id: str) -> list[str]:
         """Load persisted error lessons for a session."""
@@ -633,14 +634,14 @@ class AnalyticsAgent:
             data = json.loads(row[0])
             if isinstance(data, list):
                 return [str(x) for x in data if str(x).strip()]
-        except Exception as exc:
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
             print(f"⚠️  Could not load error lessons for session {session_id}: {exc}")
         return []
 
     def _save_error_lessons(self, session_id: str, lessons: list[str]) -> None:
         """Persist error lessons for a session."""
         try:
-            data = json.dumps(lessons[:ERROR_MEMORY_MAX_ITEMS], ensure_ascii=False)
+            data = json.dumps(lessons, ensure_ascii=False)
             self._conn.execute(
                 "INSERT INTO session_error_memory(session_id, lessons_json, updated_at) "
                 "VALUES (?, ?, ?) "
